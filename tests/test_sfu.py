@@ -6,7 +6,9 @@ import sys
 
 import pytest
 
-from conftest import ROOT
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
 from mgpu.fp.sfu import fex2, flg2, frcp, frsq
 
 NAN = 0x7FC00000

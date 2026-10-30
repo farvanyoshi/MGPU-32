@@ -133,22 +133,32 @@ def assemble_one(text: str) -> int:
     if len(ops) != len(ins.syntax):
         raise ValueError(f"{mn}: expected {len(ins.syntax)} operands, got {len(ops)}")
     f = dict(rd=0, ra=0, rb=0, rc=0, sb=0, imm=0, offset=0)
+
+    def ranged(text, lo, hi, what):
+        val = int(text, 0)
+        if not lo <= val <= hi:
+            raise ValueError(f"{mn}: {what} {val} out of range [{lo}, {hi}]")
+        return val
+
     field = {"d": "rd", "t": "rd", "a": "ra", "b": "rb", "c": "rc"}
     for tok, op in zip(ins.syntax, ops):
         if tok == "vb|sb":
             k, n = _reg(op, "vs")
             f["rb"], f["sb"] = n, int(k == "s")
-        elif tok in ("shamt",):
-            f["rb"] = int(op, 0)
+        elif tok == "shamt":
+            f["rb"] = ranged(op, 0, 31, "shift amount")
         elif tok == "sr":
-            f["ra"] = SR_BY_NAME[op.upper()]["id"] if op.upper() in SR_BY_NAME else int(op, 0)
-        elif tok in ("simm16", "uimm16", "target16"):
-            f["imm"] = int(op, 0)
+            f["ra"] = (SR_BY_NAME[op.upper()]["id"] if op.upper() in SR_BY_NAME
+                       else ranged(op, 0, 31, "special register"))
+        elif tok in ("simm16", "target16"):
+            f["imm"] = ranged(op, -0x8000, 0x7FFF, "immediate")
+        elif tok == "uimm16":
+            f["imm"] = ranged(op, 0, 0xFFFF, "immediate")
         elif tok == "target26":
-            f["offset"] = int(op, 0)
+            f["offset"] = ranged(op, -(1 << 25), (1 << 25) - 1, "offset")
         elif "(" in tok:
             m = _MEM.match(op.replace(" ", ""))
-            f["imm"] = int(m["imm"], 0)
+            f["imm"] = ranged(m["imm"], -0x8000, 0x7FFF, "offset")
             f["ra"] = _reg(m["base"], tok[-3])[1]
         else:
             f[field[tok[-1]]] = _reg(op, tok[0])[1]

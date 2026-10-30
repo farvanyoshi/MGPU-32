@@ -5,7 +5,9 @@ import sys
 
 import pytest
 
-from conftest import ROOT
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
 from mgpu.isa import BY_MNEMONIC, IllegalInstruction, assemble_one, decode, encode
 from mgpu.isa.tables import VECTORS
 
