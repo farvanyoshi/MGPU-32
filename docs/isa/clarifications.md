@@ -82,6 +82,12 @@ note**. Rule IDs like [DEC-1] refer to the v1.0 spec.
 | C-35 | §7.11 | `S_LI` could be read as "shortest form". | Always exactly two instructions, `S_LUI` then `S_ORI`, so code layout never depends on a value. | Proposed |
 | C-36 | §10.4 | Case sensitivity, the `exec` alias, SR names as operands and numeric branch offsets were not addressed. | §14 of v1.0. The full grammar is defined at breakpoint 3 (toolchain). | Proposed |
 
+## Found during simulator development (breakpoint 2)
+
+| ID | Original | Issue | Resolution | Status |
+|---|---|---|---|---|
+| C-37 | equivalence.md E4 (v1.0 draft) | Differential fuzzing showed that racing atomics in well-defined programs write and return intermediate values that depend on warp order, even though the final value is order-independent. The E4 rule "memory words written are identical per warp" was therefore unsatisfiable. | E4 compares only the *addresses* of a V_ATOM's updates, not the values written or returned. W4 now requires racing atomic return values to be discarded (written to v0 or overwritten unread), and allows only one kind of operation per raced word. | Proposed |
+
 ## Not part of the ISA
 
 - The original's §2 (VLIW/SIMD/SIMT discussion) and the closing "questions worth deciding" are design

@@ -34,10 +34,11 @@ schedule permitted by §2 and §12 of the ISA, all of the following hold:
   before it is read.
 - **W3 – No CLOCK dependence.** No value that affects memory, control flow or a fault is derived from
   `CLOCK`.
-- **W4 – No dependence on atomic order across warps.** Return values of atomics that race with other
-  warps must not affect memory, control flow or faults. (Final memory values of racing `ADD`, `MIN`,
-  `MAX`, `AND` and `OR` atomics are order-independent and therefore allowed; racing `XCHG` final values
-  are not.)
+- **W4 – No dependence on atomic order across warps.** The value returned by an atomic that races with
+  atomics of other warps must not be used: it may only be written to v0, or overwritten before it is
+  read. (Final memory values of racing `ADD`, `MIN`, `MAX`, `AND` and `OR` atomics to one word are
+  order-independent and therefore allowed, as long as only one kind of operation targets that word.
+  Racing `XCHG` final values are not.)
 - **W5 – No self-modifying code** ([MEM-2]).
 - **W6 – Fits the implementation.** `BLOCK_DIM ≤ MAX_BLOCK_DIM`, and every address the program
   touches is below `MEM_SIZE`, for both implementations being compared.
@@ -56,6 +57,9 @@ For a well-defined launch, two conforming implementations must agree on:
   instructions is the same: PC, instruction word, the registers written with their values (all 32
   lanes for vector writes, with inactive lanes unchanged), EXEC after the instruction, and the memory
   words written. The order *between* warps may differ; the order *within* a warp may not.
+  **Exception for atomics:** for a `V_ATOM` instruction, only the addresses it updates are compared,
+  not the values it writes to memory or returns. Those values depend on the order of other warps'
+  atomics even in a well-defined program (C-37).
 
 E4 is stronger than E1 and is what the RTL co-simulation checks, in lockstep against the reference
 simulator. Because it is per-warp, it does not depend on scheduling.

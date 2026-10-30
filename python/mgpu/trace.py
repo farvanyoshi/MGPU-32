@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 GLOBAL = 0
 SHARED = 1
 
+ATOM_OPCODE = 0x16
+
 # Events
 EV_NONE = 0
 EV_EXIT = 1
@@ -39,8 +41,12 @@ class CommitRecord:
                 self.exec_after, tuple(self.mwrites), self.event, self.released, self.fault)
 
     def warp_key(self) -> tuple:
-        """Form used for per-warp stream comparison (equivalence rule E4): no step number,
-        no barrier-release flag (both depend on the schedule)."""
+        """Form used for per-warp stream comparison (equivalence rule E4): no step number and
+        no barrier-release flag (both depend on the schedule). For V_ATOM only the updated
+        addresses count: the values depend on other warps' atomics (C-37)."""
+        if self.word >> 26 == ATOM_OPCODE and self.fault is None:
+            return (self.pc, self.word, self.vwrite and self.vwrite[0], self.exec_after,
+                    tuple((sp, a) for sp, a, _ in self.mwrites), self.event)
         return (self.pc, self.word, self.swrite, self.vwrite, self.exec_after,
                 tuple(self.mwrites), self.event, self.fault)
 
