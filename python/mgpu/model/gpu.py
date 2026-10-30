@@ -4,14 +4,11 @@ Implements ISA sections 11-13 and the reference schedule of docs/sim/README.md.
 """
 
 from .. import hostregs as H
+from ..errors import SimTimeout
 from ..sched import Xorshift64Star, pick
 from ..trace import EV_FAULT, CommitRecord
 from .execute import execute
 from .state import EXITED, RUN, WARP, Block, Fault
-
-
-class SimTimeout(Exception):
-    """The kernel exceeded max_steps ([FLT-3]); not an architectural fault."""
 
 
 class Gpu:
