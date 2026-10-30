@@ -4,6 +4,7 @@
 //! instruction, and both follow the same reference schedule, so they produce identical
 //! commit traces. See docs/sim/README.md.
 
+pub mod capi;
 pub mod decode;
 pub mod fp;
 pub mod gpu;
