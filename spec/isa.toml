@@ -1,0 +1,433 @@
+# MGPU-32 instruction set: machine-readable definition (normative).
+#
+# This file is the single source of truth for opcodes, funct values, formats and operand
+# syntax. The assembler, disassembler, both simulators and the RTL decoder are generated
+# from it or checked against it (tools/gen_isa.py). Behaviour is defined in
+# docs/isa/MGPU-32-ISA.md.
+#
+# Operand syntax tokens. The trailing letter names the encoding field:
+#   d -> rd [25:21]   a -> ra [20:16]   b -> rb [15:11]   c -> rc [10:6] (R4 only)
+#   t -> rd, used as store data
+# and the leading letter names the register file:
+#   s<x>  scalar register s0..s31 (alias: exec = s31)
+#   v<x>  vector register v0..v31
+#   vb|sb rb is a vector register, or a scalar register with sb = 1 (broadcast)
+# Other tokens:
+#   shamt      5-bit unsigned shift amount in the rb field (sb ignored)
+#   simm16     signed 16-bit immediate, sign-extended
+#   uimm16     unsigned 16-bit immediate, zero-extended
+#   simm16(sa) / simm16(va)   memory operand: immediate offset plus base register in ra
+#   sr         special-register id (name or number 0..31) in the ra field
+#   target16   branch target (label or signed instruction offset), imm16 field
+#   target26   jump target (label or signed instruction offset), offset26 field
+#
+# exec: "ignore" -> scalar instruction, runs once per warp regardless of EXEC.
+#       "mask"   -> vector instruction, only active lanes are affected.
+
+[meta]
+name = "MGPU-32"
+version = "1.0"
+warp_size = 32
+shared_mem_bytes = 16384
+
+[formats.R]
+fields = [["opcode", 31, 26], ["rd", 25, 21], ["ra", 20, 16], ["rb", 15, 11], ["sb", 10, 10], ["funct", 9, 0]]
+[formats.R4]
+fields = [["opcode", 31, 26], ["rd", 25, 21], ["ra", 20, 16], ["rb", 15, 11], ["rc", 10, 6], ["sb", 5, 5], ["funct", 4, 0]]
+[formats.I]
+fields = [["opcode", 31, 26], ["rd", 25, 21], ["ra", 20, 16], ["imm16", 15, 0]]
+[formats.J]
+fields = [["opcode", 31, 26], ["offset26", 25, 0]]
+
+# Special registers (section 4.2). kind: "uniform" (S_GETSR and V_GETSR) or "lane" (V_GETSR only).
+[[sr]]
+id = 0
+name = "BLOCK_ID"
+kind = "uniform"
+[[sr]]
+id = 1
+name = "BLOCK_DIM"
+kind = "uniform"
+[[sr]]
+id = 2
+name = "GRID_DIM"
+kind = "uniform"
+[[sr]]
+id = 3
+name = "WARP_ID"
+kind = "uniform"
+[[sr]]
+id = 4
+name = "NUM_WARPS"
+kind = "uniform"
+[[sr]]
+id = 5
+name = "CLOCK"
+kind = "uniform"
+[[sr]]
+id = 16
+name = "TID"
+kind = "lane"
+[[sr]]
+id = 17
+name = "LANE_ID"
+kind = "lane"
+[[sr]]
+id = 18
+name = "GTID"
+kind = "lane"
+
+# ---------------------------------------------------------------------------------------
+# Instruction groups. Every opcode not listed (0x0E, 0x0F, 0x17-0x1F, 0x23-0x3F) is
+# illegal. Within an R/R4 group, every funct value not listed is illegal.
+# ---------------------------------------------------------------------------------------
+
+[[group]]
+name = "SYS"
+opcode = 0x00
+format = "R"
+exec = "ignore"
+unit = "SYS"
+instructions = [
+  { funct = 0x0, mnemonic = "NOP",   syntax = "",  op = "nop" },
+  { funct = 0x1, mnemonic = "EXIT",  syntax = "",  op = "exit" },
+  { funct = 0x2, mnemonic = "BAR",   syntax = "",  op = "bar" },
+  { funct = 0x3, mnemonic = "FENCE", syntax = "",  op = "fence" },
+]
+
+[[group]]
+name = "S_ALU"
+opcode = 0x01
+format = "R"
+exec = "ignore"
+unit = "SALU"
+instructions = [
+  { funct = 0x00, mnemonic = "S_ADD",  syntax = "sd, sa, sb",    op = "add" },
+  { funct = 0x01, mnemonic = "S_SUB",  syntax = "sd, sa, sb",    op = "sub" },
+  { funct = 0x02, mnemonic = "S_MUL",  syntax = "sd, sa, sb",    op = "mul" },
+  { funct = 0x03, mnemonic = "S_AND",  syntax = "sd, sa, sb",    op = "and" },
+  { funct = 0x04, mnemonic = "S_OR",   syntax = "sd, sa, sb",    op = "or" },
+  { funct = 0x05, mnemonic = "S_XOR",  syntax = "sd, sa, sb",    op = "xor" },
+  { funct = 0x06, mnemonic = "S_ANDN", syntax = "sd, sa, sb",    op = "andn" },
+  { funct = 0x07, mnemonic = "S_SHL",  syntax = "sd, sa, sb",    op = "shl" },
+  { funct = 0x08, mnemonic = "S_SHR",  syntax = "sd, sa, sb",    op = "shr" },
+  { funct = 0x09, mnemonic = "S_SRA",  syntax = "sd, sa, sb",    op = "sra" },
+  { funct = 0x0A, mnemonic = "S_SLT",  syntax = "sd, sa, sb",    op = "slt" },
+  { funct = 0x0B, mnemonic = "S_SLTU", syntax = "sd, sa, sb",    op = "sltu" },
+  { funct = 0x0C, mnemonic = "S_MIN",  syntax = "sd, sa, sb",    op = "min" },
+  { funct = 0x0D, mnemonic = "S_MAX",  syntax = "sd, sa, sb",    op = "max" },
+  { funct = 0x0E, mnemonic = "S_SHLI", syntax = "sd, sa, shamt", op = "shl" },
+  { funct = 0x0F, mnemonic = "S_SHRI", syntax = "sd, sa, shamt", op = "shr" },
+  { funct = 0x10, mnemonic = "S_SRAI", syntax = "sd, sa, shamt", op = "sra" },
+  { funct = 0x11, mnemonic = "S_POPC", syntax = "sd, sa",        op = "popc" },
+  { funct = 0x12, mnemonic = "S_FF1",  syntax = "sd, sa",        op = "ff1" },
+]
+
+[[group]]
+name = "V_ALU"
+opcode = 0x02
+format = "R"
+exec = "mask"
+unit = "VALU"
+instructions = [
+  { funct = 0x00, mnemonic = "V_ADD",  syntax = "vd, va, vb|sb", op = "add" },
+  { funct = 0x01, mnemonic = "V_SUB",  syntax = "vd, va, vb|sb", op = "sub" },
+  { funct = 0x02, mnemonic = "V_MUL",  syntax = "vd, va, vb|sb", op = "mul" },
+  { funct = 0x03, mnemonic = "V_AND",  syntax = "vd, va, vb|sb", op = "and" },
+  { funct = 0x04, mnemonic = "V_OR",   syntax = "vd, va, vb|sb", op = "or" },
+  { funct = 0x05, mnemonic = "V_XOR",  syntax = "vd, va, vb|sb", op = "xor" },
+  { funct = 0x06, mnemonic = "V_ANDN", syntax = "vd, va, vb|sb", op = "andn" },
+  { funct = 0x07, mnemonic = "V_SHL",  syntax = "vd, va, vb|sb", op = "shl" },
+  { funct = 0x08, mnemonic = "V_SHR",  syntax = "vd, va, vb|sb", op = "shr" },
+  { funct = 0x09, mnemonic = "V_SRA",  syntax = "vd, va, vb|sb", op = "sra" },
+  { funct = 0x0A, mnemonic = "V_SLT",  syntax = "vd, va, vb|sb", op = "slt" },
+  { funct = 0x0B, mnemonic = "V_SLTU", syntax = "vd, va, vb|sb", op = "sltu" },
+  { funct = 0x0C, mnemonic = "V_MIN",  syntax = "vd, va, vb|sb", op = "min" },
+  { funct = 0x0D, mnemonic = "V_MAX",  syntax = "vd, va, vb|sb", op = "max" },
+  { funct = 0x0E, mnemonic = "V_SHLI", syntax = "vd, va, shamt", op = "shl" },
+  { funct = 0x0F, mnemonic = "V_SHRI", syntax = "vd, va, shamt", op = "shr" },
+  { funct = 0x10, mnemonic = "V_SRAI", syntax = "vd, va, shamt", op = "sra" },
+]
+
+[[group]]
+name = "V_FPU"
+opcode = 0x03
+format = "R"
+exec = "mask"
+unit = "FPU"
+instructions = [
+  { funct = 0x00, mnemonic = "V_FADD", syntax = "vd, va, vb|sb", op = "fadd" },
+  { funct = 0x01, mnemonic = "V_FSUB", syntax = "vd, va, vb|sb", op = "fsub" },
+  { funct = 0x02, mnemonic = "V_FMUL", syntax = "vd, va, vb|sb", op = "fmul" },
+  { funct = 0x03, mnemonic = "V_FMIN", syntax = "vd, va, vb|sb", op = "fmin" },
+  { funct = 0x04, mnemonic = "V_FMAX", syntax = "vd, va, vb|sb", op = "fmax" },
+  { funct = 0x05, mnemonic = "V_FRCP", syntax = "vd, va",        op = "frcp", unit = "SFU" },
+  { funct = 0x06, mnemonic = "V_FRSQ", syntax = "vd, va",        op = "frsq", unit = "SFU" },
+  { funct = 0x07, mnemonic = "V_FEX2", syntax = "vd, va",        op = "fex2", unit = "SFU" },
+  { funct = 0x08, mnemonic = "V_FLG2", syntax = "vd, va",        op = "flg2", unit = "SFU" },
+  { funct = 0x09, mnemonic = "V_I2F",  syntax = "vd, va",        op = "i2f" },
+  { funct = 0x0A, mnemonic = "V_F2I",  syntax = "vd, va",        op = "f2i" },
+]
+
+[[group]]
+name = "V_CMP"
+opcode = 0x04
+format = "R"
+exec = "mask"
+unit = "VALU"
+instructions = [
+  { funct = 0x0, mnemonic = "V_CMP.EQ",  syntax = "sd, va, vb|sb", op = "eq" },
+  { funct = 0x1, mnemonic = "V_CMP.NE",  syntax = "sd, va, vb|sb", op = "ne" },
+  { funct = 0x2, mnemonic = "V_CMP.LT",  syntax = "sd, va, vb|sb", op = "lt" },
+  { funct = 0x3, mnemonic = "V_CMP.LE",  syntax = "sd, va, vb|sb", op = "le" },
+  { funct = 0x4, mnemonic = "V_CMP.GT",  syntax = "sd, va, vb|sb", op = "gt" },
+  { funct = 0x5, mnemonic = "V_CMP.GE",  syntax = "sd, va, vb|sb", op = "ge" },
+  { funct = 0x6, mnemonic = "V_CMP.LTU", syntax = "sd, va, vb|sb", op = "ltu" },
+  { funct = 0x7, mnemonic = "V_CMP.LEU", syntax = "sd, va, vb|sb", op = "leu" },
+  { funct = 0x8, mnemonic = "V_CMP.FEQ", syntax = "sd, va, vb|sb", op = "feq" },
+  { funct = 0x9, mnemonic = "V_CMP.FNE", syntax = "sd, va, vb|sb", op = "fne" },
+  { funct = 0xA, mnemonic = "V_CMP.FLT", syntax = "sd, va, vb|sb", op = "flt" },
+  { funct = 0xB, mnemonic = "V_CMP.FLE", syntax = "sd, va, vb|sb", op = "fle" },
+  { funct = 0xC, mnemonic = "V_CMP.FGT", syntax = "sd, va, vb|sb", op = "fgt" },
+  { funct = 0xD, mnemonic = "V_CMP.FGE", syntax = "sd, va, vb|sb", op = "fge" },
+  { funct = 0xE, mnemonic = "V_CMP.GTU", syntax = "sd, va, vb|sb", op = "gtu" },
+  { funct = 0xF, mnemonic = "V_CMP.GEU", syntax = "sd, va, vb|sb", op = "geu" },
+]
+
+[[group]]
+name = "V_R4"
+opcode = 0x05
+format = "R4"
+exec = "mask"
+unit = "VALU"
+instructions = [
+  { funct = 0x0, mnemonic = "V_FFMA", syntax = "vd, va, vb|sb, vc", op = "ffma", unit = "FPU" },
+  { funct = 0x1, mnemonic = "V_IMAD", syntax = "vd, va, vb|sb, vc", op = "imad" },
+  { funct = 0x2, mnemonic = "V_SEL",  syntax = "vd, va, vb|sb, sc", op = "sel" },
+]
+
+[[group]]
+name = "V_LANE"
+opcode = 0x06
+format = "R"
+exec = "mask"
+unit = "VALU"
+instructions = [
+  { funct = 0x0, mnemonic = "V_READLANE", syntax = "sd, va, sb",    op = "readlane", exec = "ignore" },
+  { funct = 0x1, mnemonic = "V_SHFL",     syntax = "vd, va, vb|sb", op = "shfl" },
+]
+
+[[group]]
+name = "GETSR"
+opcode = 0x07
+format = "R"
+exec = "ignore"
+unit = "SALU"
+instructions = [
+  { funct = 0x0, mnemonic = "S_GETSR", syntax = "sd, sr", op = "getsr" },
+  { funct = 0x1, mnemonic = "V_GETSR", syntax = "vd, sr", op = "getsr", exec = "mask", unit = "VALU" },
+]
+
+[[group]]
+name = "S_ADDI"
+opcode = 0x08
+format = "I"
+exec = "ignore"
+unit = "SALU"
+instructions = [{ mnemonic = "S_ADDI", syntax = "sd, sa, simm16", op = "add" }]
+
+[[group]]
+name = "S_ANDI"
+opcode = 0x09
+format = "I"
+exec = "ignore"
+unit = "SALU"
+instructions = [{ mnemonic = "S_ANDI", syntax = "sd, sa, uimm16", op = "and" }]
+
+[[group]]
+name = "S_ORI"
+opcode = 0x0A
+format = "I"
+exec = "ignore"
+unit = "SALU"
+instructions = [{ mnemonic = "S_ORI", syntax = "sd, sa, uimm16", op = "or" }]
+
+[[group]]
+name = "S_LUI"
+opcode = 0x0B
+format = "I"
+exec = "ignore"
+unit = "SALU"
+instructions = [{ mnemonic = "S_LUI", syntax = "sd, uimm16", op = "lui" }]
+
+[[group]]
+name = "V_ADDI"
+opcode = 0x0C
+format = "I"
+exec = "mask"
+unit = "VALU"
+instructions = [{ mnemonic = "V_ADDI", syntax = "vd, va, simm16", op = "add" }]
+
+[[group]]
+name = "V_ANDI"
+opcode = 0x0D
+format = "I"
+exec = "mask"
+unit = "VALU"
+instructions = [{ mnemonic = "V_ANDI", syntax = "vd, va, uimm16", op = "and" }]
+
+[[group]]
+name = "S_LW"
+opcode = 0x10
+format = "I"
+exec = "ignore"
+unit = "LSU"
+instructions = [{ mnemonic = "S_LW", syntax = "sd, simm16(sa)", op = "load", space = "global" }]
+
+[[group]]
+name = "S_SW"
+opcode = 0x11
+format = "I"
+exec = "ignore"
+unit = "LSU"
+instructions = [{ mnemonic = "S_SW", syntax = "st, simm16(sa)", op = "store", space = "global" }]
+
+[[group]]
+name = "V_LW"
+opcode = 0x12
+format = "I"
+exec = "mask"
+unit = "LSU"
+instructions = [{ mnemonic = "V_LW", syntax = "vd, simm16(va)", op = "load", space = "global" }]
+
+[[group]]
+name = "V_SW"
+opcode = 0x13
+format = "I"
+exec = "mask"
+unit = "LSU"
+instructions = [{ mnemonic = "V_SW", syntax = "vt, simm16(va)", op = "store", space = "global" }]
+
+[[group]]
+name = "V_LDS"
+opcode = 0x14
+format = "I"
+exec = "mask"
+unit = "LSU"
+instructions = [{ mnemonic = "V_LDS", syntax = "vd, simm16(va)", op = "load", space = "shared" }]
+
+[[group]]
+name = "V_STS"
+opcode = 0x15
+format = "I"
+exec = "mask"
+unit = "LSU"
+instructions = [{ mnemonic = "V_STS", syntax = "vt, simm16(va)", op = "store", space = "shared" }]
+
+[[group]]
+name = "V_ATOM"
+opcode = 0x16
+format = "R"
+exec = "mask"
+unit = "LSU"
+instructions = [
+  { funct = 0x00, mnemonic = "V_ATOM.ADD",    syntax = "vd, va, vb|sb", op = "add",  space = "global" },
+  { funct = 0x01, mnemonic = "V_ATOM.MIN",    syntax = "vd, va, vb|sb", op = "min",  space = "global" },
+  { funct = 0x02, mnemonic = "V_ATOM.MAX",    syntax = "vd, va, vb|sb", op = "max",  space = "global" },
+  { funct = 0x03, mnemonic = "V_ATOM.XCHG",   syntax = "vd, va, vb|sb", op = "xchg", space = "global" },
+  { funct = 0x04, mnemonic = "V_ATOM.AND",    syntax = "vd, va, vb|sb", op = "and",  space = "global" },
+  { funct = 0x05, mnemonic = "V_ATOM.OR",     syntax = "vd, va, vb|sb", op = "or",   space = "global" },
+  { funct = 0x10, mnemonic = "V_ATOM.ADD.S",  syntax = "vd, va, vb|sb", op = "add",  space = "shared" },
+  { funct = 0x11, mnemonic = "V_ATOM.MIN.S",  syntax = "vd, va, vb|sb", op = "min",  space = "shared" },
+  { funct = 0x12, mnemonic = "V_ATOM.MAX.S",  syntax = "vd, va, vb|sb", op = "max",  space = "shared" },
+  { funct = 0x13, mnemonic = "V_ATOM.XCHG.S", syntax = "vd, va, vb|sb", op = "xchg", space = "shared" },
+  { funct = 0x14, mnemonic = "V_ATOM.AND.S",  syntax = "vd, va, vb|sb", op = "and",  space = "shared" },
+  { funct = 0x15, mnemonic = "V_ATOM.OR.S",   syntax = "vd, va, vb|sb", op = "or",   space = "shared" },
+]
+
+[[group]]
+name = "S_BZ"
+opcode = 0x20
+format = "I"
+exec = "ignore"
+unit = "BRU"
+instructions = [{ mnemonic = "S_BZ", syntax = "sd, target16", op = "bz" }]
+
+[[group]]
+name = "S_BNZ"
+opcode = 0x21
+format = "I"
+exec = "ignore"
+unit = "BRU"
+instructions = [{ mnemonic = "S_BNZ", syntax = "sd, target16", op = "bnz" }]
+
+[[group]]
+name = "S_J"
+opcode = 0x22
+format = "J"
+exec = "ignore"
+unit = "BRU"
+instructions = [{ mnemonic = "S_J", syntax = "target26", op = "j" }]
+
+# ---------------------------------------------------------------------------------------
+# Pseudo-instructions (section 7.11). Expansions use ${operand} substitution; the
+# assembler documents its exact rules in docs/toolchain/assembler.md.
+# ---------------------------------------------------------------------------------------
+[[pseudo]]
+mnemonic = "S_MOV"
+syntax = "sd, sa"
+expansion = ["S_ADD ${sd}, ${sa}, s0"]
+[[pseudo]]
+mnemonic = "S_LI"
+syntax = "sd, imm32"
+expansion = ["S_LUI ${sd}, %hi(${imm32})", "S_ORI ${sd}, ${sd}, %lo(${imm32})"]
+[[pseudo]]
+mnemonic = "V_MOV"
+syntax = "vd, va"
+expansion = ["V_ADD ${vd}, ${va}, v0"]
+[[pseudo]]
+mnemonic = "V_BCAST"
+syntax = "vd, sa"
+expansion = ["V_ADD ${vd}, v0, ${sa}"]
+[[pseudo]]
+mnemonic = "V_NOT"
+syntax = "vd, va"
+expansion = ["V_SUB ${vd}, v0, ${va}", "V_ADDI ${vd}, ${vd}, -1"]
+[[pseudo]]
+mnemonic = "V_FNEG"
+syntax = "vd, va, st"
+expansion = ["S_LUI ${st}, 0x8000", "V_XOR ${vd}, ${va}, ${st}"]
+[[pseudo]]
+mnemonic = "V_FABS"
+syntax = "vd, va, st"
+expansion = ["S_LUI ${st}, 0x8000", "V_ANDN ${vd}, ${va}, ${st}"]
+[[pseudo]]
+mnemonic = "V_FDIV"
+syntax = "vd, va, vb, vt"
+expansion = ["V_FRCP ${vt}, ${vb}", "V_FMUL ${vd}, ${va}, ${vt}"]
+[[pseudo]]
+mnemonic = "S_MOVEXEC"
+syntax = "sd"
+expansion = ["S_ADD ${sd}, s31, s0"]
+
+# ---------------------------------------------------------------------------------------
+# Conformance encodings (section 5, "Worked encodings"). Checked by tools/gen_isa.py.
+# ---------------------------------------------------------------------------------------
+[[vector]]
+asm = "V_ADD v3, v2, s3"
+hex = 0x08621C00
+[[vector]]
+asm = "V_LW v5, 0(v3)"
+hex = 0x48A30000
+[[vector]]
+asm = "V_FFMA v6, v5, s2, v6"
+hex = 0x14C511A0
+[[vector]]
+asm = "S_ADDI s12, s12, -1"
+hex = 0x218CFFFF
+[[vector]]
+asm = "S_BNZ s12, -5"
+hex = 0x8580FFFB
+[[vector]]
+asm = "V_CMP.LT s10, v1, s1"
+hex = 0x11410C02
