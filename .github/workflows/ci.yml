@@ -1,0 +1,52 @@
+# Runs on every push to main/dev and on pull requests: lints and tests the Rust engine,
+# builds the Python package, checks that generated files are current, and runs the full
+# test suite plus a fuzzing batch (model vs Rust, schedule independence).
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Rust format and lint
+        run: |
+          cargo fmt --manifest-path rust/Cargo.toml --all --check
+          cargo clippy --manifest-path rust/Cargo.toml --release --all-targets -- -D warnings
+
+      - name: Rust unit tests
+        run: cargo test --manifest-path rust/Cargo.toml --release -p mgpu-core
+
+      - name: Build and install the Python package
+        run: pip install -e ".[test]"
+
+      - name: Generated files are up to date
+        run: |
+          python tools/gen_isa.py --check
+          python tools/gen_sfu_tables.py --check
+
+      - name: Test suite
+        env:
+          MGPU_FUZZ_SEEDS: "100"
+        run: python -m pytest -q
+
+      - name: Fuzzing batch
+        run: python -m mgpu.fuzz --seeds 500 --start 1000000
