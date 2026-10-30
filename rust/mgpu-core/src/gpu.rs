@@ -952,3 +952,143 @@ impl Gpu {
             .and_then(|b| b.warps.get(warp as usize))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CODE: u32 = 0x1000;
+    // V_GETSR v1, GTID; V_SHLI v2, v1, 2; V_ADD v2, v2, s1; V_SW v1, 0(v2); EXIT
+    const STORE_GTID: [u32; 5] = [
+        0x1c32_0001,
+        0x0841_100e,
+        0x0842_0c00,
+        0x4c22_0000,
+        0x0000_0001,
+    ];
+    // S_GETSR s1, WARP_ID; S_BZ s1, +2; BAR; EXIT; BAR; EXIT
+    const BAR_MISMATCH: [u32; 6] = [
+        0x1c23_0000,
+        0x8020_0002,
+        0x0000_0002,
+        0x0000_0001,
+        0x0000_0002,
+        0x0000_0001,
+    ];
+
+    fn gpu(cfg: Config, prog: &[u32]) -> Gpu {
+        let mut g = Gpu::new(Config {
+            mem_size: 1 << 20,
+            ..cfg
+        })
+        .unwrap();
+        let bytes: Vec<u8> = prog.iter().flat_map(|w| w.to_le_bytes()).collect();
+        g.mem_write(CODE as u64, &bytes).unwrap();
+        g.reg_write(REG_ENTRY, CODE).unwrap();
+        g
+    }
+
+    fn launch(g: &mut Gpu, grid: u32, block: u32, arg0: u32) {
+        g.reg_write(REG_GRID_DIM, grid).unwrap();
+        g.reg_write(REG_BLOCK_DIM, block).unwrap();
+        g.reg_write(REG_ARG0, arg0).unwrap();
+        g.reg_write(REG_GO, 1).unwrap();
+    }
+
+    fn word(g: &Gpu, a: u64) -> u32 {
+        u32::from_le_bytes(g.mem_read(a, 4).unwrap().try_into().unwrap())
+    }
+
+    #[test]
+    fn multi_block_kernel_under_every_schedule() {
+        for (resident, seed) in [(1, None), (3, None), (2, Some(7))] {
+            let cfg = Config {
+                resident_blocks: resident,
+                seed,
+                ..Config::default()
+            };
+            let mut g = gpu(cfg, &STORE_GTID);
+            launch(&mut g, 3, 70, 0x8000);
+            assert_eq!(g.reg_read(REG_STATUS), 0);
+            assert_eq!(g.reg_read(REG_GO), 0);
+            assert_eq!(g.steps, 3 * 3 * 5);
+            for i in 0..210 {
+                assert_eq!(word(&g, 0x8000 + 4 * i as u64), i);
+            }
+            assert_eq!(word(&g, 0x8000 + 4 * 210), 0); // lanes beyond BLOCK_DIM never store
+        }
+    }
+
+    #[test]
+    fn launch_validation() {
+        let mut g = gpu(
+            Config {
+                max_block_dim: 256,
+                ..Config::default()
+            },
+            &STORE_GTID,
+        );
+        launch(&mut g, 1, 257, 0x8000);
+        assert_eq!(g.reg_read(REG_STATUS), E_LAUNCH);
+        g.reg_write(REG_ENTRY, CODE + 2).unwrap();
+        launch(&mut g, 1, 32, 0x8000);
+        assert_eq!(
+            (g.reg_read(REG_STATUS), g.reg_read(REG_ERR_INFO)),
+            (E_MISALIGNED, CODE + 2)
+        );
+        assert_eq!(g.steps, 0);
+    }
+
+    #[test]
+    fn barrier_mismatch_is_reported() {
+        let mut g = gpu(Config::default(), &BAR_MISMATCH);
+        launch(&mut g, 1, 64, 0);
+        assert_eq!(g.reg_read(REG_STATUS), E_BARRIER);
+        let (pc, info) = (g.reg_read(0x24), g.reg_read(REG_ERR_INFO));
+        assert!(
+            pc != info
+                && [CODE + 8, CODE + 16].contains(&pc)
+                && [CODE + 8, CODE + 16].contains(&info)
+        );
+    }
+
+    #[test]
+    fn misaligned_store_faults_precisely() {
+        let mut g = gpu(
+            Config {
+                trace: true,
+                ..Config::default()
+            },
+            &STORE_GTID,
+        );
+        launch(&mut g, 1, 32, 0x8002);
+        assert_eq!(g.reg_read(REG_STATUS), E_MISALIGNED);
+        let last = g.trace.last().unwrap();
+        assert_eq!(last.fault, Some((E_MISALIGNED, 0, 0x8002)));
+        assert!(last.mwrites.is_empty());
+        assert_eq!(word(&g, 0x8004), 0);
+    }
+
+    #[test]
+    fn driven_mode_matches_free_run() {
+        let mut free = gpu(
+            Config {
+                trace: true,
+                ..Config::default()
+            },
+            &STORE_GTID,
+        );
+        launch(&mut free, 2, 64, 0x8000);
+        let mut driven = gpu(Config::default(), &STORE_GTID);
+        driven.reg_write(REG_GRID_DIM, 2).unwrap();
+        driven.reg_write(REG_BLOCK_DIM, 64).unwrap();
+        driven.reg_write(REG_ARG0, 0x8000).unwrap();
+        assert!(driven.begin());
+        // replay the free run's schedule: identical records
+        for rec in &free.trace {
+            assert_eq!(&driven.step(rec.block, rec.warp).unwrap(), rec);
+        }
+        assert!(!driven.running());
+        assert!(matches!(driven.step(0, 0), Err(SimError::NotRunnable(_))));
+    }
+}
