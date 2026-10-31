@@ -11,6 +11,9 @@ license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = ["numpy"]
 
+[project.scripts]
+mgpu-as = "mgpu.asm.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest"]
 
