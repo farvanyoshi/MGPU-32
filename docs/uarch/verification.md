@@ -66,6 +66,10 @@ programs whose results depend on the schedule.
 
 ## 4. Top level (breakpoint 7)
 
+*Status: done for C = 1, 2 and 4 (host interface, multi-core, abort, atomics across cores, cycle
+comparison); see [`docs/rtl/README.md`](../rtl/README.md) §6–7. Every program matches `launch_timed`
+exactly, including the kernels, so no difference had to be documented.*
+
 - **Host interface:** a CSR-port test of every register in ISA §13.1, including writes ignored while
   running, launch validation (STATUS 5 and 2, GRID_DIM = 0) and GO/irq timing.
 - **Multi-core:** dispatch order, abort with several cores faulting, and atomics from several cores

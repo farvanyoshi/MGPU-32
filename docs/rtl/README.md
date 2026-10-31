@@ -7,7 +7,7 @@ The work is staged over three breakpoints:
 |---|---|---|
 | 5a `bp5-rtl-units` | Generated ISA package and SFU ROM; integer ALU, FPU and SFU units, verified bit-exactly | **done** |
 | 5b `bp6-rtl-core` | One core: warp table, scheduler, fetch/I-cache, decode, register files, LSU, barriers; lockstep co-simulation, cycle-exact against the timing model | **done** |
-| 5c `bp7-rtl-top` | Host registers, dispatcher, memory arbiter, atomic unit, multi-core; cycle comparison; synthesis | planned |
+| 5c `bp7-rtl-top` | Host registers, dispatcher, memory arbiter, atomic unit, multi-core, AXI4-Lite; whole-GPU lockstep and cycle comparison; RAM-based register files and memories; synthesis flow | **done** (synthesis numbers pending, §8) |
 
 ## 1. Tools
 
@@ -34,9 +34,11 @@ MGPU_RTL_FUZZ_SEEDS=200 python -m pytest -m rtl -k fuzz   # a larger fuzz soak
 
 ```
 rtl/pkg/      packages: mgpu_isa_pkg (generated from spec/isa.toml), mgpu_fp_pkg, mgpu_core_pkg
-rtl/common/   generic blocks (mgpu_pipe)
+rtl/common/   generic blocks (mgpu_pipe, mgpu_ram)
 rtl/units/    execution units; mgpu_sfu_rom.sv is generated from spec/sfu/
 rtl/core/     the core (mgpu_core and its blocks)
+rtl/top/      the GPU: host registers, dispatcher, memory arbiter, atomic unit, mgpu_top,
+              the AXI4-Lite adapter and mgpu_gpu (the integration and synthesis top)
 tb/cocotb/    cocotb testbenches (Python; references are mgpu._core and mgpu.model);
               lockstep.py, memory.py and directed.py drive the core
 tb/rtl/       small wrappers that expose internal types on plain ports for testing
@@ -87,28 +89,34 @@ results exactly `LAT` cycles later. The core feeds them P passes per vector inst
 | `mgpu_core_pkg` | `ctrl_t`, the issue packet `ipkt_t`, the retire record `retire_t`, the LSU types, fault codes, retire channels |
 | `mgpu_decode` | Word → `ctrl_t`: illegal ([DEC-1], GETSR legality), unit, registers, extended immediate, `sb`, destinations |
 | `mgpu_fetch` | Round-robin fetch, 16 × 128 B direct-mapped I-cache with overlapping fills tagged by warp slot, decode stage, per-warp instruction buffers, fetch-fault markers |
-| `mgpu_srf`, `mgpu_vrf` | Register files: full-width reads, one write port per writer, block-start initialization |
+| `mgpu_srf` | Scalar register file: read in the issue cycle, one write port per writer |
+| `mgpu_vrf` | Vector register file in RAMs (`mgpu_ram`): a bank per warp, a read copy per operand stream, a RAM per pass with lane enables; valid bits for the block-start zero |
 | `mgpu_salu` | Scalar ALU (through `mgpu_int_lane`), branches, NOP/FENCE/EXIT/BAR |
-| `mgpu_vexec` | VALU, FPU or SFU with its P-pass sequencer; merged 32-lane record on the completion cycle; V_CMP masks; V_SHFL/V_READLANE |
-| `mgpu_agen` | LSU analysis at issue: lane addresses, precise fault, segment count and order, bank-conflict degree and rounds |
-| `mgpu_lsu` | Segment requests, per-warp load/atomic slots, shared memory in bank rounds, shared atomics lane by lane |
-| `mgpu_core` | Warp table, scheduler with per-unit free-at counters, operand read, packet pipeline, writeback, barrier and fence, stores outstanding, faults, retire port |
+| `mgpu_vexec` | VALU, FPU or SFU fed by the operand slices as they arrive; each pass written back under EXEC; 32-lane record on the completion cycle; V_CMP masks; V_SHFL/V_READLANE |
+| `mgpu_agen` | LSU access analysis on the last address slice: lane addresses, precise fault, segment count and order, bank-conflict degree and rounds |
+| `mgpu_lsu` | Address slices, occupancy report, segment requests, per-warp load/atomic slots, shared memory in 32 bank RAMs (rounds, atomics lane by lane) |
+| `mgpu_core` | Warp table, scheduler with per-unit free-at counters, per-warp operand sequencers, packet pipeline, write ports, barrier and fence, stores outstanding, faults, retire port |
 
 **Choices worth knowing:**
-- **Operands at issue.** The register files are read in full (all 32 lanes) in the issue cycle, so
-  the LSU's segment and conflict counts, and hence its occupancy, are known when the scheduler needs
-  them. The P address passes of `core.md` §8.1 remain as LSU occupancy. The register files are flop
-  arrays here; their block-RAM mapping is a Phase 5c synthesis task.
+- **Operands per pass.** After issue, each warp's sequencer reads one pass of its source registers
+  per cycle from the warp's register-file bank, so pass *p* arrives as it enters the unit
+  ([`core.md`](../uarch/core.md) §6). The LSU analyses its access on the last address slice and
+  reports the occupancy to the scheduler then (§8.1); scalar accesses and EXEC = 0 are settled at
+  issue.
+- **Memories.** The vector register file, shared memory and the I-cache lines are RAMs with a
+  registered read (`mgpu_ram`), so FPGA tools map them to block or distributed RAM. RAMs cannot be
+  cleared in a cycle, so valid bits supply the zero registers and the shared-memory poison after
+  block start.
 - **Retire port.** One record per completed instruction, on one channel per writer (SALU, VALU,
   FPU, SFU, four LSU channels, faults), so no channel ever needs two records in a cycle. The LSU
   channels are stores (at their last request), shared accesses and empty global accesses (after the
   occupancy), global loads, and global atomics (both at the last response + 1).
-- **Faults** are detected at issue. The core stops issuing, lets the instructions in flight retire,
-  then reports the fault record.
+- **Faults** are detected at issue, or with the LSU's analysis for address faults. The core stops
+  issuing, lets the other instructions in flight retire, then reports the fault record when the
+  dispatcher selects it.
 - **Memory ports** are segment wide (1024-bit data, one request per cycle, separate READ-data,
-  ATOMIC and WRITE-ack response channels; [`interfaces.md`](../uarch/interfaces.md) §4.1). The
-  Phase 5c arbiter converts them to the 128-bit beats of §2. Global atomics are executed by the
-  memory side, in lane order (the testbench model now, the atomic unit in 5c).
+  ATOMIC and WRITE-ack response channels; [`interfaces.md`](../uarch/interfaces.md) §4.1). The memory
+  arbiter and atomic unit convert them to the 128-bit beats of §2.
 - **Barriers.** A warp arrives once its BAR has completed and its stores are acknowledged. The
   barrier releases in the cycle every live, non-exited warp has arrived, and released warps may issue
   in that cycle. The barrier PC is taken when the first BAR issues, as the timing model does.
@@ -128,7 +136,26 @@ I-cache fill. The cycle comparison found two timing-model bugs this way, both fi
 - it served memory requests at issue instead of in request order;
 - it prefetched the BAR again, instead of PC + 4, while a warp waited at a barrier.
 
-## 6. What is verified
+## 6. The GPU (`rtl/top`)
+
+`mgpu_top` (parameters `C`, `W`, `L`, `S`, `MEM_SIZE`, `QL`) implements
+[`top.md`](../uarch/top.md); `mgpu_gpu` puts it behind the AXI4-Lite host port for integration.
+
+| Module | Does |
+|---|---|
+| `mgpu_host_regs` | ISA §13.1 register map on the CSR port; launch parameters writable only while idle; GO, STATUS/ERR_*, CYCLES, `irq_done` |
+| `mgpu_dispatcher` | Launch validation in cycle 0; every idle core gets the next block in the same cycle; end of launch; fault selection (earliest issue, then lowest core), hold, drain and kill |
+| `mgpu_mem_arbiter` | Per-port request queues stamped with the request cycle; requests leave in (request cycle, core, LSU before I-fetch) order, the order of core.md §11.4, with no added latency; responses routed by a 16-bit tag |
+| `mgpu_atomic_unit` | Segment ↔ 128-bit beats; global atomics as read, lane-ordered update, write-back with the last read beat, blocking other traffic |
+| `mgpu_axil_csr` | AXI4-Lite slave in front of the CSR port |
+| `mgpu_top`, `mgpu_gpu` | The GPU; the integration and synthesis top |
+
+**Whole-GPU lockstep testbench** (`tb/cocotb/top_lockstep.py`): the testbench is the host (launch
+through the CSR port, results read back from it) and the memory (`memory.BeatMemory`, the 128-bit
+port). The engine runs with one resident block per core, and every core's records are checked as in
+§5. CYCLES must equal `launch_timed` with the same number of cores.
+
+## 7. What is verified
 
 | Check | Volume | Reference |
 |---|---|---|
@@ -170,4 +197,45 @@ Unit tests for the core's blocks:
 Each was checked to fail with a planted bug (EXEC ignored in the merge, a stale fill installed, CLOCK
 off by one, an unsigned atomic MIN).
 
+**The GPU (`test_top`), through its host and memory ports, for C = 1, 2 and 4, every program in
+lockstep and cycle-exact against the timing model with the same number of cores:** launch validation
+(STATUS 5, 2, GRID_DIM = 0), all 135 directed programs, all 30 kernel launches, fuzz programs (eq mode
+across blocks and cores, diff and raw on one block), and multi-core focus programs (every block
+faulting at once, all cores' atomics on one word, a fault while other cores stream loads, stores and
+atomics).
+
+Unit tests for the top-level blocks:
+- `test_host_regs`: 20,000 cycles of random CSR traffic and launch ends against the engine's
+  register semantics.
+- `test_dispatcher`: 300 launches per configuration with stand-in cores, including faults detected
+  at issue and late.
+- `test_memsys`: arbiter + atomic unit between stand-in cores and a beat-level memory; every
+  response's cycle and data against the contract.
+- `test_axil`: 3,000 random AXI4-Lite transactions with back-pressure.
+- `test_vrf`: the RAM-based register file against a model (millions of lane reads).
+
 See [`docs/uarch/verification.md`](../uarch/verification.md) for the overall plan.
+
+## 8. Synthesis
+
+```bash
+pip install yowasp-yosys            # or any Yosys on PATH
+SV2V=/path/to/sv2v python tools/synth.py --top mgpu_gpu --cores 4 --target both
+```
+
+Yosys's built-in SystemVerilog reader does not accept the subset the RTL uses (functions returning
+packed structs, `inside`, struct literals), so `tools/synth.py` first converts the sources with
+[sv2v](https://github.com/zachjs/sv2v). It synthesizes `mgpu_gpu` (or one `mgpu_core`) for ECP5 and
+Xilinx 7-series and prints LUTs, flip-flops, block RAMs, distributed RAMs and DSPs.
+
+**Status.** The resource numbers have not been produced yet: sv2v could not be run in the
+environment this phase was developed in. The flow is in place and lints; the table goes here once
+it has been run.
+
+**Known FPGA work** (structures that are still flip-flops or long combinational paths):
+- The arbiter's request queues (64 entries per core, each carrying a whole segment request) are
+  flip-flops; they should become RAMs with a show-ahead head register.
+- The LSU's per-warp load/atomic slots and the executors' operand buffers are flip-flops (a few
+  kilobits per core).
+- Timing closure has not been attempted: the FPU datapath, the LSU's address analysis and the
+  scheduler's issue selection are single combinational stages.

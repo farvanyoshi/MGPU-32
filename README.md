@@ -18,7 +18,7 @@ reviewed before continuing.
 | 4 | `bp4-uarch` | Microarchitecture specification + cycle-level timing model | **done** |
 | 5 | `bp5-rtl-units` | RTL execution units (ALU, FPU, SFU) verified with cocotb/Verilator | **done** |
 | 6 | `bp6-rtl-core` | Full RTL core, lockstep trace co-simulation, cycle-exact vs the timing model | **done** |
-| 7 | `bp7-rtl-top` / `v1.0` | Multi-core top level, host interface, synthesis report | planned |
+| 7 | `bp7-rtl-top` / `v1.0` | Multi-core top level, host interface (AXI4-Lite), whole-GPU lockstep, RAM-based memories, synthesis flow | **done** (synthesis numbers pending) |
 
 ## The architecture in one paragraph
 
@@ -63,7 +63,7 @@ python/mgpu/               Python package: ISA tables, bit-exact float32, refere
 rust/mgpu-core/            fast simulator engine and cycle-level timing model
                            (also a C library: include/mgpu_core.h)
 rust/mgpu-py/              Python bindings (mgpu._core)
-rtl/                       SystemVerilog (packages generated from spec/; units: VALU, FPU, SFU; the core)
+rtl/                       SystemVerilog (packages generated from spec/; units, the core, the multi-core top)
 tb/                        RTL testbenches: cocotb (Python) and a Verilator C++ bulk harness
 tools/                     generators (gen_isa.py, gen_sfu_tables.py), sfu_accuracy.py, bench.py,
                            sweep.py (design-space sweep with the timing model)
