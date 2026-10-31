@@ -34,3 +34,13 @@ FPU_SOURCES = ("common/mgpu_pipe.sv", "units/mgpu_round.sv", "units/mgpu_fpu_lan
 def test_fpu(lanes):
     run_cocotb("mgpu_fpu", sources(*FPU_SOURCES), "test_fpu", parameters={"L": lanes},
                extra_env={"L": str(lanes), "LAT": "4"})
+
+
+SFU_SOURCES = ("common/mgpu_pipe.sv", "units/mgpu_round.sv", "units/mgpu_sfu_rom.sv",
+               "units/mgpu_sfu_lane.sv", "units/mgpu_sfu.sv")
+
+
+@pytest.mark.parametrize("lanes", [2, 1])
+def test_sfu(lanes):
+    run_cocotb("mgpu_sfu", sources(*SFU_SOURCES), "test_sfu", parameters={"S": lanes},
+               extra_env={"S": str(lanes), "LAT": "8"})
