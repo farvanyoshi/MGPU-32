@@ -136,7 +136,13 @@ impl Memory {
         match q.kind {
             ReqKind::Fill { .. } | ReqKind::Load => self.accept(q.r, 1) + self.latency + 8,
             ReqKind::Store => self.accept(q.r, 1) + self.latency,
-            ReqKind::Atomic => self.accept(q.r, 2) + 2 * self.latency + 8,
+            // The atomic unit reads the segment, then writes it back in the read's last-beat
+            // cycle; memory takes nothing else until the write is accepted (top.md §5).
+            ReqKind::Atomic => {
+                let done = q.r.max(self.free) + self.latency + 8;
+                self.free = done + self.seg;
+                done
+            }
         }
     }
     fn next_request(&self) -> Option<u64> {

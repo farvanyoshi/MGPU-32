@@ -91,8 +91,9 @@ The atomic unit sits between the arbiter and memory. A `READ` or `WRITE` passes 
 1. It reads the segment.
 2. It applies each participating lane's operation in ascending lane order to the word at that lane's
    offset, updating a local copy so that colliding lanes see each other's results.
-3. It writes the segment back.
-4. It returns the 32 old values.
+3. It writes the segment back. The WRITE request goes out in the cycle the READ's last data beat
+   arrives, carrying the updated words in the following 8 beats.
+4. It returns the 32 old values, in the cycle the READ's last beat arrives.
 
 The unit processes one atomic segment at a time, and blocks other traffic to memory while it does.
 That makes every atomic indivisible with respect to every other access, from any core ([MEM-5]).

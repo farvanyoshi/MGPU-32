@@ -39,9 +39,9 @@ From Python, use `Device(timing={"warps": 8, "lanes": 8, "mem_latency": 100})`; 
 |---|---|---|---|---|
 | `saxpy` | 52,589 (8%) | 28,525 (14%) | 17,005 (22%) | 11,469 (31%) |
 | `reduce` | 115,926 (25%) | 77,652 (40%) | 70,036 (48%) | 68,712 (52%) |
-| `warp_reduce` | 83,053 (12%) | 52,141 (20%) | 39,885 (26%) | 34,605 (30%) |
+| `warp_reduce` | 83,053 (12%) | 64,941 (16%) | 59,085 (17%) | 51,149 (20%) |
 | `collatz` | 1,604,637 (26%) | 1,271,368 (33%) | 1,232,595 (34%) | 1,225,888 (34%) |
-| `histogram` | 30,258 (10%) | 20,330 (17%) | 16,509 (23%) | 15,574 (30%) |
+| `histogram` | 30,254 (10%) | 20,326 (17%) | 16,505 (23%) | 15,570 (30%) |
 | `sigmoid` | 52,589 (14%) | 29,869 (24%) | 20,269 (33%) | 15,469 (41%) |
 | `matmul` | — | — | 150,949 (53%) | 150,949 (53%) |
 | `conv3x3` | 162,965 (5%) | 162,965 (5%) | 162,965 (5%) | 162,965 (5%) |
@@ -52,9 +52,9 @@ From Python, use `Device(timing={"warps": 8, "lanes": 8, "mem_latency": 100})`; 
 |---|---|---|---|
 | `saxpy` | 17,005 | 15,213 (1.12x) | 14,573 (1.17x) |
 | `reduce` | 70,036 | 52,850 (1.33x) | 44,983 (1.56x) |
-| `warp_reduce` | 39,885 | 27,373 (1.46x) | 23,405 (1.70x) |
+| `warp_reduce` | 59,085 | 46,381 (1.27x) | 42,605 (1.39x) |
 | `collatz` | 1,232,595 | 662,690 (1.86x) | 447,296 (2.76x) |
-| `histogram` | 16,509 | 15,183 (1.09x) | 14,694 (1.12x) |
+| `histogram` | 16,505 | 15,183 (1.09x) | 14,694 (1.12x) |
 | `sigmoid` | 20,269 | 18,765 (1.08x) | 18,381 (1.10x) |
 | `matmul` | 150,949 | 108,528 (1.39x) | 104,241 (1.45x) |
 | `conv3x3` | 162,965 | 156,759 (1.04x) | 153,624 (1.06x) |
@@ -65,9 +65,9 @@ From Python, use `Device(timing={"warps": 8, "lanes": 8, "mem_latency": 100})`; 
 |---|---|---|---|---|---|
 | `saxpy` | 12,155 | 17,005 | 26,705 | 46,105 | 3.79x |
 | `reduce` | 66,736 | 70,036 | 76,636 | 89,836 | 1.35x |
-| `warp_reduce` | 35,035 | 39,885 | 49,585 | 68,985 | 1.97x |
+| `warp_reduce` | 44,635 | 59,085 | 87,985 | 145,785 | 3.27x |
 | `collatz` | 1,229,345 | 1,232,595 | 1,239,095 | 1,252,095 | 1.02x |
-| `histogram` | 14,459 | 16,509 | 20,615 | 28,981 | 2.00x |
+| `histogram` | 14,455 | 16,505 | 20,611 | 28,977 | 2.00x |
 | `sigmoid` | 17,019 | 20,269 | 26,769 | 39,769 | 2.34x |
 | `matmul` | 143,151 | 150,949 | 166,225 | 195,625 | 1.37x |
 | `conv3x3` | 102,065 | 162,965 | 284,765 | 528,365 | 5.18x |
@@ -78,13 +78,12 @@ From Python, use `Device(timing={"warps": 8, "lanes": 8, "mem_latency": 100})`; 
 |---|---|---|---|---|---|
 | `saxpy` | 17,005 | 0.18 | 100% | 37 / 7 / 0 / 28 | mem 52%, unit 18%, ifetch 6% |
 | `reduce` | 70,036 | 0.46 | 39% | 37 / 12 / 0 / 50 | unit 32%, bar 6%, ifetch 6%, mem 6% |
-| `warp_reduce` | 39,885 | 0.26 | 92% | 69 / 0 / 0 / 6 | unit 34%, mem 29%, ifetch 6%, inflight 5% |
+| `warp_reduce` | 59,085 | 0.17 | 92% | 47 / 0 / 0 / 4 | mem 52%, unit 23% |
 | `collatz` | 1,232,595 | 0.34 | 45% | 95 / 0 / 0 / 0 | unit 49%, ifetch 15% |
-| `histogram` | 16,509 | 0.23 | 100% | 44 / 0 / 0 / 64 | unit 32%, mem 26%, ifetch 10%, inflight 6% |
+| `histogram` | 16,505 | 0.23 | 100% | 44 / 0 / 0 / 64 | unit 32%, mem 26%, ifetch 10%, inflight 6% |
 | `sigmoid` | 20,269 | 0.28 | 100% | 42 / 18 / 48 / 15 | unit 30%, mem 18%, inflight 13%, ifetch 6% |
 | `matmul` | 150,949 | 0.52 | 100% | 72 / 22 / 0 / 63 | unit 30%, mem 12% |
 | `conv3x3` | 162,965 | 0.05 | 100% | 6 / 3 / 0 / 8 | mem 89% |
-
 
 ## 3. What the numbers say, and the resulting choices
 
@@ -92,14 +91,15 @@ From Python, use `Device(timing={"warps": 8, "lanes": 8, "mem_latency": 100})`; 
 - Going from 2 to 8 warps speeds the suite up by 1.3–3.1×. More warps are the only way this
   machine hides memory latency.
 - From 8 to 16 warps:
-  - compute-bound kernels gain under 15% (reduce, collatz, warp_reduce, histogram);
+  - compute-bound and atomic-bound kernels gain at most 16% (reduce, collatz, warp_reduce,
+    histogram);
   - matmul gains nothing, since its 256-thread block already fills 8 slots;
   - only the purely memory-bound saxpy and sigmoid gain 1.3–1.5×.
 - 16 slots would double the vector register file to 3 × 64 KiB of block RAM. **8 is the knee.**
 
 **Physical lanes: L = 8.**
 - Quadrupling the datapath to L = 32 costs about 4× the ALU, FPU and register-port area, but buys
-  only 1.06–1.7× on most kernels.
+  only 1.06–1.6× on most kernels.
 - The exception is collatz (2.8×). It is entirely VALU-bound because divergence keeps it issuing
   vector instructions with half the lanes idle. More lanes speed that up, but do not fix the waste.
 - Memory-bound kernels barely move. **L = 8 is the efficient point** for an FPGA-sized core; L = 16 is
@@ -110,6 +110,13 @@ From Python, use `Device(timing={"warps": 8, "lanes": 8, "mem_latency": 100})`; 
   per byte. Kernels with reuse (matmul through shared memory, reduce) are barely affected.
 - The 128-byte segment coalescing keeps saxpy at one request per warp access. Without it, saxpy would
   be 32× more memory-bound.
+- **Global atomics are expensive.** The atomic unit reads the segment, then writes it back. Memory
+  takes nothing else meanwhile (T_mem + 8 + T_seg cycles per atomic segment; top.md §5).
+  warp_reduce, which ends every warp with a global atomic, spends 52% of its cycles waiting for
+  memory and is the second most latency-sensitive kernel (3.3× from 50 to 400 cycles).
+  - Reducing within the block in shared memory first, then using one atomic per block, is the
+    efficient pattern on this design.
+  - A pipelined atomic unit with per-word locking is a possible later extension.
 
 **I-cache: 2 KiB is plenty.**
 - Every kernel hits at least 99.95% of the time; the only misses are the 1–3 cold misses for its
@@ -129,7 +136,7 @@ From Python, use `Device(timing={"warps": 8, "lanes": 8, "mem_latency": 100})`; 
 **Where the remaining time goes at W = 8, L = 8.**
 - `unit` stalls (18–49%) mean a warp was ready but the VALU was still busy with the previous
   4-pass instruction. That is the expected price of a narrow datapath: the VALU is the most-used unit,
-  69–95% busy in the compute-bound kernels.
+  72–95% busy in the compute-bound kernels (matmul, collatz).
 - `mem` stalls dominate the streaming kernels.
 - The SFU (2 datapaths, 16 cycles per instruction) is 48% busy in sigmoid. That is acceptable for a
   unit few kernels use.

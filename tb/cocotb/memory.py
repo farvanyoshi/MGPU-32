@@ -1,9 +1,10 @@
 """Testbench memory model behind a core's memory ports (docs/uarch/core.md 11.4).
 
-Segment requests are accepted at a = max(r, free), with free = a + T_seg afterwards
-(ATOMIC: two slots). A READ completes at a + T_mem + 8, a WRITE is acknowledged at
-a + T_mem, an ATOMIC completes at a + 2 * T_mem + 8. Within a cycle, LSU requests are
-accepted before the I-fetch request.
+Segment requests are accepted at a = max(r, free), with free = a + T_seg afterwards.
+A READ completes at a + T_mem + 8 and a WRITE is acknowledged at a + T_mem. An ATOMIC
+(the atomic unit: read, modify, write back) completes at done = a + T_mem + 8 and blocks
+the memory until its write-back is accepted at done, so free = done + T_seg. Within a
+cycle, LSU requests are accepted before the I-fetch request.
 """
 
 from mgpu.model.execute import atom_op
@@ -60,7 +61,8 @@ class Memory:
             self.acks[ack] = r["warp"]
         else:                                               # ATOMIC, lanes in ascending order
             self.atomics += 1
-            done = self.accept(now, 2) + 2 * self.t_mem + 8
+            done = max(now, self.free) + self.t_mem + 8
+            self.free = done + self.t_seg
             op = ATOM_OPS[r["aop"]]
             old = 0
             for lane in range(32):

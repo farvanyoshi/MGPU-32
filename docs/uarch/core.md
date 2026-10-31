@@ -204,7 +204,7 @@ A store writes lanes in ascending order within each bank cycle, so the highest l
 
 - **Shared atomics** (`.S`) execute in the LSU on the shared-memory array, one active lane per
   cycle, in ascending lane order. They occupy the LSU for `P + n_active` cycles, with latency 1.
-- **Global atomics** are sent to the memory-side atomic unit (top.md §5), one request per segment,
+- **Global atomics** are sent to the atomic unit in front of memory (top.md §5), one request per segment,
   carrying the lanes of that segment in ascending order. Each request returns the old values. The warp
   waits for all responses. Lanes in different segments are applied segment by segment, which is
   still ascending lane order within each word.
@@ -284,8 +284,9 @@ The memory system is shared by all cores and both ports of each core:
   index, the LSU port before the I-fetch port.
 - A READ completes at `a + T_mem + 8` (the eight data beats).
 - A WRITE is acknowledged at `a + T_mem`.
-- An ATOMIC holds the memory for two slots (`mem_free = a + 2·T_seg`) and completes at
-  `a + 2·T_mem + 8`.
+- An ATOMIC is executed by the atomic unit (top.md §5). Its READ is accepted at `a` and is complete
+  at `done = a + T_mem + 8`. The write-back is accepted in that same cycle, and the memory takes no
+  other request before it: `mem_free = done + T_seg`. The old values are available at `done`.
 - The LSU sends its segment requests at consecutive cycles: request *k* at `t + 2 + P + k`.
 - A **global load** completes at `max(done_k) + 1`.
 - A **global store** completes at `t + 2 + P + n_seg − 1`; each acknowledgement lowers `stores_out`
