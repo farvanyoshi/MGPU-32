@@ -18,7 +18,9 @@ package mgpu_core_pkg;
     logic        mem_shared;  // LSU access targets shared memory
   } ctrl_t;
 
-  // Instruction issued to an execution unit: operands read in full (core.md section 6).
+  // Instruction issued to an execution unit (core.md section 6). Scalar operands travel
+  // with it; vector operands are read from the VRF one pass per cycle and stream into the
+  // unit alongside (vslice_t).
   typedef struct packed {
     logic              valid;
     logic [4:0]        warp;
@@ -28,8 +30,20 @@ package mgpu_core_pkg;
     ctrl_t             ctrl;
     logic [31:0]       exec;            // EXEC before the instruction ([EX-3])
     logic [31:0]       sa, sb, sc, sd;  // S[ra], scalar B (S[rb] or imm), S[rc], S[rd]
-    logic [31:0][31:0] va, vb, vc, vd;  // V[ra], B per lane, V[rc], old V[rd]
+    logic              bcast;           // B is the scalar sb in every lane (sb, immediates)
+    logic              gsr;             // V_GETSR: lane i of va = gsr_base + (gsr_lin ? i : 0)
+    logic              gsr_lin;
+    logic [31:0]       gsr_base;
   } ipkt_t;
+
+  // A write into the vector register file: any lanes of one register.
+  typedef struct packed {
+    logic              valid;
+    logic [4:0]        warp;
+    logic [4:0]        rd;
+    logic [31:0]       mask;
+    logic [31:0][31:0] data;
+  } vwr_t;
 
   // One retired instruction (the fields of mgpu_record / CommitRecord).
   typedef struct packed {

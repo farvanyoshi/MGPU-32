@@ -1,8 +1,12 @@
 // mgpu_lsu: load/store unit (docs/uarch/core.md 8, 11.4).
 //
-// An instruction enters at e = t + 2 together with its access analysis (mgpu_agen, done at
-// issue; faulting accesses never get here). With i = cycle - e:
-//   i in [0, P)            address passes
+// An instruction enters at e = t + 2 as a scalar packet; its va (addresses), vb (atomic
+// operands) and vd (store data, and the old values for the records) arrive from the
+// register file one slice per cycle, slice k at e + k. With i = cycle - e:
+//   i in [0, P)            address passes; at i = P - 1, with the last slice, mgpu_agen
+//                          analyses the access: the precise fault ([MEM-3]; the instruction
+//                          ends here, before any request), and the segment count, conflict
+//                          degree or active lanes, reported to the scheduler (occ_*)
 //   global, i = P + k      segment request k (k < n_seg), one per cycle
 //     store                record at i = P - 1 + n_seg (with its last request; LSU_S)
 //     load / atomic        record one cycle after the last response (LSU_B / LSU_C), from a
@@ -23,14 +27,26 @@ module mgpu_lsu
   import mgpu_core_pkg::*;
 #(
     parameter int W = 8,
-    parameter int P = 4,
+    parameter int L = 8,
+    localparam int P = 32 / L,
     localparam int WB = (W > 1) ? $clog2(W) : 1
 ) (
     input  logic              clk,
     input  logic              rst_n,
     input  logic              clr,          // block start
+    input  logic [31:0]       mem_last,
     input  ipkt_t             in,
-    input  lsu_info_t         in_info,
+    input  logic [L-1:0][31:0] sl_a, sl_b, sl_d,
+    output logic              occ_valid,    // analysis done: occupancy = P + occ_n
+    output logic [7:0]        occ_n,
+    output logic              fault,        // the access faults (with the analysis)
+    output logic [7:0]        fault_code,
+    output logic [4:0]        fault_lane,
+    output logic [31:0]       fault_info,
+    output ipkt_t             fault_pkt,
+    output vwr_t              vwr_a,        // register writes: shared accesses, global loads,
+    output vwr_t              vwr_b,        // global atomics (with rec_a, rec_b, rec_c)
+    output vwr_t              vwr_c,
     output mreq_t             req,
     input  logic              rd_valid,     // READ response: the segment
     /* verilator lint_off UNUSEDSIGNAL */   // tags carry 5-bit warp numbers; W slots use the low bits
@@ -51,18 +67,53 @@ module mgpu_lsu
 
   // ---------------------------------------------------------------- current instruction
   ipkt_t     cur, x;
-  lsu_info_t ci, xi;
+  lsu_info_t ci, xi, ai;
   logic [7:0] cnt, xc, occ;
   logic       busy, xv, xs, xl, xst, xa;
   assign x   = in.valid ? in : cur;
-  assign xi  = in.valid ? in_info : ci;
   assign xc  = in.valid ? 8'd0 : cnt;
   assign xv  = in.valid || busy;
   assign xs  = x.ctrl.mem_shared;
   assign xl  = is_load(x.ctrl.op);
   assign xst = is_store(x.ctrl.op);
   assign xa  = !xl && !xst;
+
+  // ---------------------------------------------------------------- slices and analysis
+  logic [31:0][31:0] ba, bb, bd, va, vb, vd;
+  logic              arriving, ana, af;
+  logic [7:0]        af_code;
+  logic [4:0]        af_lane;
+  logic [31:0]       af_info;
+  assign arriving = xv && xc < 8'(P);
+  assign ana = xv && xc == 8'(P - 1);           // the last slice arrives
+  always_comb begin
+    va = ba;
+    vb = bb;
+    vd = bd;
+    if (arriving) begin
+      for (int l = 0; l < L; l++) begin
+        va[int'(xc) * L + l] = sl_a[l];
+        vb[int'(xc) * L + l] = sl_b[l];
+        vd[int'(xc) * L + l] = sl_d[l];
+      end
+    end
+    if (x.bcast) for (int i = 0; i < 32; i++) vb[i] = x.sb;
+  end
+  mgpu_agen u_agen (.ctrl(x.ctrl), .exec(x.exec), .sa(x.sa), .sd(x.sd), .va(va), .vb(vb), .vd(vd),
+                    .mem_last, .info(ai), .fault(af), .fcode(af_code), .flane(af_lane), .finfo(af_info));
+  assign xi = ana ? ai : ci;
   assign occ = 8'(P) + (!xs ? 8'(xi.n_seg) : xa ? 8'(xi.n_act) : 8'(xi.d));
+  // reported only for the accesses whose occupancy is unknown at issue: vector accesses
+  // with some active lane (scalar ones and EXEC = 0 are settled at issue)
+  assign occ_valid = ana && !af && !is_scalar_mem(x.ctrl.op) && x.exec != 32'd0;
+  assign occ_n = occ - 8'(P);
+  assign fault = ana && af;
+  assign fault_code = af_code;
+  assign fault_lane = af_lane;
+  assign fault_info = af_info;
+  assign fault_pkt = x;
+  logic ok;                                     // past the analysis without a fault
+  assign ok = !(ana && af);
 
   // ---------------------------------------------------------------- global requests
   logic       g_req;
@@ -98,7 +149,7 @@ module mgpu_lsu
   // store record, with the last request
   always_comb begin
     rec_s = '0;
-    if (xv && !xs && xst && xc == 8'(P - 1) + 8'(xi.n_seg)) begin
+    if (xv && ok && xc >= 8'(P - 1) && !xs && xst && xc == 8'(P - 1) + 8'(xi.n_seg)) begin
       rec_s = ret_from(x);
       rec_s.mw_lanes = xi.lanes;
       rec_s.mw_addr = xi.addr;
@@ -140,24 +191,31 @@ module mgpu_lsu
 
   // ---------------------------------------------------------------- post-occupancy records (LSU_A)
   retire_t    pw_rec, pw_next;
+  vwr_t       pw_vwr, pw_wnext;
   logic [1:0] pw_cnt, pw_set;
   always_comb begin
     logic [31:0][31:0] m;
     pw_next = ret_from(x);
+    pw_wnext = '0;
+    pw_wnext.warp = x.warp;
+    pw_wnext.rd = x.ctrl.rd;
     pw_set = 2'd0;
-    m = x.vd;
+    m = vd;
     if (s_last) begin                        // shared load / store
       pw_set = 2'd1;
       if (xl) begin
         for (int l = 0; l < 32; l++) if (xi.lanes[l]) m[l] = lr[l] ? rdl[l] : sacc[l];
         pw_next = ret_vector(pw_next, x.ctrl.rd, m);
+        pw_wnext.valid = x.ctrl.rd != 5'd0;
+        pw_wnext.mask = xi.lanes;
+        pw_wnext.data = m;
       end else begin
         pw_next.mw_lanes = xi.lanes;
         pw_next.mw_shared = 1'b1;
         pw_next.mw_addr = xi.addr;
         pw_next.mw_val = xi.data;
       end
-    end else if (xv && xs && xa && xi.n_act == 6'd0 && xc == 8'(P - 1)) begin
+    end else if (ana && ok && xs && xa && xi.n_act == 6'd0) begin
       pw_set = 2'd1;                         // shared atomic, no active lane
       pw_next = ret_vector(pw_next, x.ctrl.rd, m);
     end else if (a_last) begin               // shared atomic, last lane
@@ -172,16 +230,21 @@ module mgpu_lsu
       pw_next.mw_lanes = xi.lanes;
       pw_next.mw_shared = 1'b1;
       pw_next.mw_addr = xi.addr;
-    end else if (xv && !xs && !xst && xi.n_seg == 6'd0 && xc == 8'(P - 1)) begin
+      pw_wnext.valid = x.ctrl.rd != 5'd0;
+      pw_wnext.mask = xi.lanes;
+      pw_wnext.data = m;
+    end else if (ana && ok && !xs && !xst && xi.n_seg == 6'd0) begin
       pw_set = 2'd2;                         // global load / atomic, no active lane
       pw_next = ret_vector(pw_next, x.ctrl.rd, m);
     end
   end
   assign rec_a = pw_cnt == 2'd1 ? pw_rec : '0;
+  assign vwr_a = pw_cnt == 2'd1 ? pw_vwr : '0;
 
   // ---------------------------------------------------------------- per-warp load / atomic slots
   logic [W-1:0]             done_b, done_c;
   ipkt_t [W-1:0]            ow_pkt;
+  logic [W-1:0][31:0][31:0] ow_vd;
   logic [W-1:0][31:0]       ow_lanes;
   logic [W-1:0][31:0][4:0]  ow_seg;
   logic [W-1:0][31:0][31:0] ow_addr, ow_data, ow_acc;
@@ -190,17 +253,28 @@ module mgpu_lsu
   always_comb begin
     rec_b = '0;
     rec_c = '0;
+    vwr_b = '0;
+    vwr_c = '0;
     for (int w = 0; w < W; w++) begin
       logic [31:0][31:0] m;
       retire_t r;
-      m = ow_pkt[w].vd;
+      vwr_t    vw;
+      m = ow_vd[w];
+      vw = '0;
+      vw.valid = !is_scalar_mem(ow_pkt[w].ctrl.op) && ow_pkt[w].ctrl.rd != 5'd0;
+      vw.warp = ow_pkt[w].warp;
+      vw.rd = ow_pkt[w].ctrl.rd;
+      vw.mask = ow_lanes[w];
+      vw.data = ow_acc[w];
       for (int l = 0; l < 32; l++) if (ow_lanes[w][l]) m[l] = ow_acc[w][l];
       r = ret_from(ow_pkt[w]);
       if (done_b[w]) begin
         rec_b = is_scalar_mem(ow_pkt[w].ctrl.op) ? ret_scalar(r, ow_pkt[w].ctrl.rd, ow_acc[w][0])
                                                  : ret_vector(r, ow_pkt[w].ctrl.rd, m);
+        vwr_b = vw;
       end
       if (done_c[w]) begin
+        vwr_c = vw;
         rec_c = ret_vector(r, ow_pkt[w].ctrl.rd, m);
         rec_c.mw_lanes = ow_lanes[w];
         rec_c.mw_addr = ow_addr[w];
@@ -223,13 +297,18 @@ module mgpu_lsu
       // sequencing
       if (in.valid) begin
         cur <= in;
-        ci <= in_info;
         cnt <= 8'd1;
-        busy <= occ > 8'd1;
+        busy <= 1'b1;                        // at least the P address passes
       end else if (busy) begin
         cnt <= cnt + 8'd1;
-        if (cnt == occ - 8'd1) busy <= 1'b0;
+        if (cnt >= 8'(P - 1) && (cnt == occ - 8'd1 || (ana && af))) busy <= 1'b0;
       end
+      if (arriving) begin
+        ba <= va;
+        bb <= vb;
+        bd <= vd;
+      end
+      if (ana) ci <= ai;
       // shared rounds (ascending lanes: the highest lane wins a store)
       if (s_round) begin
         for (int l = 0; l < 32; l++) begin
@@ -248,19 +327,21 @@ module mgpu_lsu
       if (pw_cnt != 2'd0) pw_cnt <= pw_cnt - 2'd1;
       if (pw_set != 2'd0) begin
         pw_rec <= pw_next;
+        pw_vwr <= pw_wnext;
         pw_cnt <= pw_set;
       end
-      // per-warp slots: allocate at entry, fill from responses, complete one cycle after
-      // the last response
+      // per-warp slots: allocate with the analysis, fill from responses, complete one cycle
+      // after the last response
       done_b <= '0;
       done_c <= '0;
-      if (in.valid && !in.ctrl.mem_shared && !is_store(in.ctrl.op) && in_info.n_seg != 6'd0) begin
-        ow_pkt[WB'(in.warp)] <= in;
-        ow_lanes[WB'(in.warp)] <= in_info.lanes;
-        ow_seg[WB'(in.warp)] <= in_info.seg;
-        ow_addr[WB'(in.warp)] <= in_info.addr;
-        ow_data[WB'(in.warp)] <= in_info.data;
-        ow_pend[WB'(in.warp)] <= in_info.n_seg;
+      if (ana && ok && !xs && !xst && ai.n_seg != 6'd0) begin
+        ow_pkt[WB'(x.warp)] <= x;
+        ow_vd[WB'(x.warp)] <= vd;
+        ow_lanes[WB'(x.warp)] <= ai.lanes;
+        ow_seg[WB'(x.warp)] <= ai.seg;
+        ow_addr[WB'(x.warp)] <= ai.addr;
+        ow_data[WB'(x.warp)] <= ai.data;
+        ow_pend[WB'(x.warp)] <= ai.n_seg;
       end
       if (rd_valid) begin
         for (int l = 0; l < 32; l++)

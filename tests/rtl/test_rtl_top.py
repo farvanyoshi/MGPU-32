@@ -12,7 +12,7 @@ MEM = 1 << 20
 
 
 def top_sources():
-    files = ["common/mgpu_pipe.sv"]
+    files = ["common/mgpu_pipe.sv", "common/mgpu_ram.sv"]
     for d in ("units", "core", "top"):
         files += [str(p.relative_to(RTL)) for p in sorted((RTL / d).glob("*.sv"))]
     return sources(*files)

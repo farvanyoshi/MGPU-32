@@ -2,7 +2,7 @@
 VERILATOR ?= ../tools/verilator.sh
 
 PKG    := pkg/mgpu_isa_pkg.sv pkg/mgpu_fp_pkg.sv pkg/mgpu_core_pkg.sv
-COMMON := common/mgpu_pipe.sv
+COMMON := common/mgpu_pipe.sv common/mgpu_ram.sv
 UNITS  := units/mgpu_round.sv units/mgpu_int_lane.sv units/mgpu_valu.sv \
           units/mgpu_fpu_lane.sv units/mgpu_fpu.sv \
           units/mgpu_sfu_rom.sv units/mgpu_sfu_lane.sv units/mgpu_sfu.sv

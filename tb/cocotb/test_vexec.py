@@ -88,7 +88,8 @@ def make_case(rng, pc):
     w.block, w.wid, w.pc, w.s, w.v = SimpleNamespace(bid=0), 0, 0, s, v
     gpu = SimpleNamespace(mem_size=1 << 20, load_word=lambda a: word)
     rec = execute(gpu, w, 0)
-    exp = dict(pc=pc, swrite=rec.swrite, vwrite=rec.vwrite, exec_after=rec.exec_after)
+    exp = dict(pc=pc, swrite=rec.swrite, vwrite=rec.vwrite, exec_after=rec.exec_after,
+               old_vd=list(unpack(ins["vd"], 32)))
     return mn, ins, exp
 
 
@@ -104,6 +105,7 @@ async def random_instructions(dut):
     rng = random.Random(1000 + KIND * 10 + LANES)
     n_cases = int(os.environ.get("CASES", "300"))
     pending: deque = deque()
+    writes = []                                   # register writes since the last record
     free_at, issued, done, it = 0, 0, 0, 0
     while done < n_cases:
         dut.in_valid.value = 0
@@ -121,6 +123,8 @@ async def random_instructions(dut):
             issued += 1
         await RisingEdge(dut.clk)
         await ReadOnly()
+        if int(dut.vwr_valid.value):
+            writes.append((int(dut.vwr_rd.value), int(dut.vwr_mask.value), unpack(dut.vwr_data.value, 32)))
         if int(dut.out_valid.value):
             assert pending, f"unexpected output in iteration {it}"
             due, mn, exp = pending.popleft()
@@ -128,6 +132,18 @@ async def random_instructions(dut):
             assert due == it, f"{mn}: completed in iteration {it}, expected {due}"
             for k in ("pc", "swrite", "vwrite", "exec_after"):
                 assert got[k] == exp[k], f"{mn} (pc {exp['pc']:#x}): {k} {got[k]} != {exp[k]}"
+            # the register writes leave the destination with the record's lanes
+            if exp["vwrite"]:
+                reg = list(exp["old_vd"])
+                for rd, mask, data in writes:
+                    assert rd == exp["vwrite"][0], f"{mn}: write to v{rd}"
+                    for i in range(32):
+                        if mask >> i & 1:
+                            reg[i] = data[i]
+                assert tuple(reg) == exp["vwrite"][1], f"{mn} (pc {exp['pc']:#x}): register writes {reg}"
+            else:
+                assert not writes, f"{mn}: unexpected register writes"
+            writes = []
             done += 1
         else:
             assert not pending or pending[0][0] != it, f"{pending[0][1]}: missing completion in iteration {it}"

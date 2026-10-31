@@ -7,12 +7,14 @@
 //            ascending core order, all in the same cycle. When every block is done, the
 //            launch ends with CYCLES = the cycle in which the last block completed.
 //
-// Faults: a core reports a faulting instruction in the cycle it issues (fault_issue). In
-// that cycle every higher-numbered core is held (halt), and from the next cycle every core
-// is. Since all faults are detected at issue, exactly one instruction faults. Once every
-// core has drained (fault_go) the faulting core emits its fault record; once all memory
-// traffic has settled, the launch ends with CYCLES = issue cycle + 1 (core.md 11.6) and
-// every core is killed.
+// Faults: a core reports a fault when it detects it (fault_det), with the issue clock of
+// the faulting instruction; most faults are detected at issue (fault_issue), LSU address
+// faults P + 1 cycles later. In the cycle of a fault at issue every higher-numbered core is
+// held (halt), and from the cycle after any detection every core is. The reported fault is
+// the one that issued first (ties: the lower core), as in the timing model. Once every core
+// has drained, that core alone may emit its fault record (fault_go); once all memory traffic
+// has settled, the launch ends with CYCLES = its issue cycle + 1 (core.md 11.6) and every
+// core is killed.
 module mgpu_dispatcher #(
     parameter int C = 4,
     parameter int W = 8
@@ -36,10 +38,12 @@ module mgpu_dispatcher #(
     output logic [5:0]            num_warps,
     output logic                  kill,
     output logic [C-1:0]          halt,
-    output logic                  fault_go,
+    output logic [C-1:0]          fault_go,
     input  logic [C-1:0]          idle,
     input  logic [C-1:0]          block_done,
     input  logic [C-1:0]          fault_issue,
+    input  logic [C-1:0]          fault_det,
+    input  logic [C-1:0][31:0]    fault_clk,
     input  logic [C-1:0]          busy_ops,
     input  logic [C-1:0]          mem_quiet,
     input  logic [C-1:0]          fault_valid,
@@ -54,13 +58,33 @@ module mgpu_dispatcher #(
   logic [31:0]         cyc, next_block, blocks_done, t_fault;
   logic                fault_seen;
   logic [C-1:0]        fresh;
-  logic [C-1:0][31:0]  cur_block;
+  logic [C-1:0][31:0]  cur_block, cur_start;
+  int                  best_c;
   logic [5:0][31:0]    fstatus;
 
   assign busy = state != S_IDLE;
   assign live_cycles = cyc;
   assign num_warps = 6'((block_dim + 32'd31) >> 5);
-  assign fault_go = !(|busy_ops);
+  always_comb for (int c = 0; c < C; c++) fault_go[c] = !(|busy_ops) && fault_seen && best_c == c;
+
+  // the earliest-issued fault among this cycle's detections and the one already held
+  logic        nf_any;
+  int          nf_c;
+  logic [31:0] nf_t;
+  always_comb begin
+    nf_any = fault_seen;
+    nf_c = best_c;
+    nf_t = t_fault;
+    for (int c = 0; c < C; c++) begin
+      logic [31:0] t;
+      t = cur_start[c] + fault_clk[c];
+      if (fault_det[c] && (!nf_any || t < nf_t || (t == nf_t && c < nf_c))) begin
+        nf_any = 1'b1;
+        nf_c = c;
+        nf_t = t;
+      end
+    end
+  end
 
   // ---- validation (cycle 0)
   logic v_dim, v_entry, v_grid;
@@ -92,6 +116,10 @@ module mgpu_dispatcher #(
 
   // same-cycle priority of a fault at issue, then a hold on every core (one assign per core,
   // so that halt[c] visibly depends on the lower cores only)
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic unused_last;
+  assign unused_last = fault_issue[C-1];   // the highest core holds nobody back
+  /* verilator lint_on UNUSEDSIGNAL */
   for (genvar c = 0; c < C; c++) begin : g_halt
     if (c == 0) begin : g_first
       assign halt[c] = fault_seen;
@@ -151,13 +179,15 @@ module mgpu_dispatcher #(
             if (start[c]) begin
               fresh[c] <= 1'b0;
               cur_block[c] <= block_id[c];
+              cur_start[c] <= cyc;
             end
           end
-          if (|fault_issue && !fault_seen) begin
+          if (|fault_det) begin
             fault_seen <= 1'b1;
-            t_fault <= cyc;
+            best_c <= nf_c;
+            t_fault <= nf_t;
           end
-          for (int c = C - 1; c >= 0; c--) begin
+          for (int c = 0; c < C; c++) begin
             if (fault_valid[c]) begin
               fstatus <= '{fault_info[c], 32'(fault_lane[c]), 32'(fault_warp[c]), cur_block[c],
                            fault_pc[c], 32'(fault_code[c])};

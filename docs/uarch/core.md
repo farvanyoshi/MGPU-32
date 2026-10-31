@@ -106,11 +106,14 @@ fetch-fault marker, which faults when the warp is next scheduled ([MEM-7]).
 
 An illegal instruction is carried as a fault marker and faults when issued (code 1, info = word).
 
-Every fault is detected at issue (illegal words, fetch-fault markers, LSU address checks, barrier
-mismatches). The core then stops issuing, lets every instruction already in flight complete, and
-reports the fault record no earlier than *t* + 3. Instructions issued before the fault therefore
-take full effect, which is the order in which the reference engine executes them. `CYCLES` still
-follows §11.6 (issue cycle + 1).
+Faults are detected at issue (illegal words, fetch-fault markers, barrier mismatches), except LSU
+address faults, which the LSU detects with its address analysis at *t* + 1 + *P* (§8.1). The core
+then stops issuing, lets every other instruction in flight complete, and reports the fault record
+once the dispatcher allows it (top.md §6).
+- The reported fault is the one whose instruction issued first, and `CYCLES` follows §11.6 (its
+  issue cycle + 1), exactly as in the timing model.
+- Instructions issued between an LSU fault's issue and its detection still complete. The ISA allows
+  this: memory after a fault is undefined ([FLT-1]).
 
 ## 6. Register files (`mgpu_srf`, `mgpu_vrf`)
 
@@ -126,20 +129,28 @@ follows §11.6 (issue cycle + 1).
   block RAM (96 KiB in total).
 - v0 reads as 0 and writes to it are dropped.
 
-**Operand read in the reference RTL.** An issued instruction reads its *whole* 32-lane
-source registers in the operand-read stage. The execution unit is then fed one `L`-lane slice per
-pass from that latched copy, and the merged 32-lane result is written once, at completion.
-- **EXEC.** Inactive lanes keep the old value, which is read with the operands ([EX-3]).
-- **Why this is identical.** A warp never has two instructions in flight, so this is
-  indistinguishable from reading and writing slice by slice, and the timing of §11 is unchanged.
-- **Ports.** Units complete independently, so the register files have one write port per writing
-  unit. A warp still has at most one instruction in flight, so two ports never write the same warp.
-  - Scalar register file: the SALU, VALU (V_CMP, V_READLANE) and LSU (S_LW).
-  - Vector register file: the VALU, FPU, SFU and two LSU paths.
-- **FPGA mapping.** In `rtl/core/mgpu_srf.sv` and `mgpu_vrf.sv` these are behavioural multi-port
-  arrays. Mapping them onto block RAM (the three operand copies described above, banked by pass, plus
-  a live-value table for the multiple writers) is a synthesis-time refinement, evaluated with Yosys in
-  Phase 5c.
+**Organization in the RTL (`mgpu_vrf`).**
+- **One bank per warp slot.** A warp has at most one instruction in flight, so at most one unit
+  writes a given warp in a cycle; each bank has a single write port, muxed among the writers (VALU,
+  FPU, SFU and three LSU paths).
+- **Read copies.** Each bank has one read copy per operand stream: va, vb and vc, plus a fourth for
+  the old vd. The fourth copy only feeds the retire records (inactive lanes after a write); with the
+  retire port left unconnected, synthesis removes it.
+- **Pass RAMs.** Inside each copy, one RAM per pass (32 registers × `L` lanes, a write enable per
+  lane). A pass of an instruction reads one RAM; a full-register write (a load, V_SHFL) writes all of
+  them in the same cycle.
+- **Block start.** RAMs cannot be cleared in one cycle, so a valid bit per (warp, register, lane) is
+  cleared instead, and a lane that was never written reads 0 (ISA §13.3). v0 is never written.
+
+**Operand read.** After an instruction issues at *t*, its warp's sequencer reads pass *p* of each
+source register in cycle *t* + 1 + *p*; the data arrives in *t* + 2 + *p*, as pass *p* enters the
+unit (§11.2).
+- A unit narrower than a slice (the SFU, `S` < `L`) keeps the slices it has received and takes its
+  lanes from them.
+- **Write-back.** The VALU, FPU and SFU write each pass back as it leaves the unit, with the pass's
+  EXEC bits as lane enables ([EX-3]); the LSU writes whole registers under EXEC.
+- **Scalar register file.** A small multi-port array read in the issue cycle. Its write ports are the
+  SALU, the VALU (V_CMP, V_READLANE) and the LSU (S_LW).
 
 ## 7. Execution units
 
@@ -165,11 +176,17 @@ pass from that latched copy, and the merged 32-lane result is written once, at c
 
 ### 8.1 Address generation and precise faults
 
-1. During the first `P` cycles, the LSU computes the 32 lane addresses (`va + sext(imm)`, or the
-   scalar address for S_LW/S_SW).
-2. It checks every active lane: misaligned first, then out of range; the lowest faulting lane wins.
+1. During the first `P` cycles, the LSU receives the address register one slice per cycle and
+   computes the 32 lane addresses (`va + sext(imm)`, or the scalar address for S_LW/S_SW).
+2. With the last slice (cycle *t* + 1 + *P*), it checks every active lane: misaligned first, then out
+   of range; the lowest faulting lane wins.
 3. If any lane faults, the instruction ends here with a fault record, before any request has been
    issued ([MEM-3]).
+4. Otherwise the same analysis gives the number of segments, the bank-conflict degree or the active
+   lanes, and so the occupancy (§8.2–8.4). The scheduler learns it then; until then the LSU counts as
+   busy. This loses nothing: the next LSU instruction could not issue before *t* + 1 + *P* anyway,
+   unless EXEC = 0, whose occupancy (`P`, or `P` + 1 for a shared load or store) is known at issue,
+   like that of the scalar accesses (`P` + 1).
 
 ### 8.2 Global loads and stores (coalescing)
 

@@ -295,7 +295,10 @@ async def memory_faults(dut):
 
 async def suite(dut, progs, label):
     diffs = []
+    only = os.environ.get("MGPU_RTL_ONLY")          # run only programs whose name contains this
     for p in progs:
+        if only and only not in p["name"]:
+            continue
         if "src" in p:
             ln = dict(words=assemble(p["src"], CODE).words, grid=p["grid"], block=p["block"],
                       args=p["args"], memory=p["data"], mem_size=p["mem"])
@@ -304,7 +307,8 @@ async def suite(dut, progs, label):
                       memory=p["image"], mem_size=p["mem"])
         dut._log.info(f"{label}: {p['name']}")
         launch = Launch(**{"entry": CODE, **ln})
-        res = await Lockstep(dut, launch, W, T_MEM, T_SEG).run(max_cycles=2_000_000)
+        res = await Lockstep(dut, launch, W, T_MEM, T_SEG).run(
+            max_cycles=int(os.environ.get("MGPU_RTL_MAX_CYCLES", "2000000")))
         want = timed_cycles(launch)
         if res.cycles != want:
             diffs.append((p["name"], res.cycles, want))

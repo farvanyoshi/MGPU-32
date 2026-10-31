@@ -103,16 +103,16 @@ Shared-memory atomics never reach this unit: the LSU executes them in the core (
 
 ## 6. Faults and abort
 
-Every fault is detected when its instruction issues (core.md §5). That cycle defines the reported
-fault and `CYCLES` = issue cycle + 1 (core.md §11.6), exactly as in the timing model:
+A core reports each fault it detects together with the issue clock of the faulting instruction:
+at issue, or *P* + 1 cycles later for an LSU address fault (core.md §5). The reported fault is the
+one that issued first, ties going to the lower core, and `CYCLES` = its issue cycle + 1 (core.md
+§11.6). That is where the timing model stops ([FLT-2]).
 - **Same cycle.** In the cycle a core issues a faulting instruction, every higher-numbered core is
   held and issues nothing (`halt`). The timing model handles cores in index order and stops at the
   fault.
-- **Later cycles.** From the next cycle, every core is held. So exactly one instruction faults
-  ([FLT-2]).
-- **Drain.** Instructions already issued complete ([FLT-1]). When no core has any left
-  (`fault_go`), the faulting core reports `{code, pc, warp, lane, info}`; the dispatcher adds the
-  block.
+- **Later cycles.** From the cycle after any detection, every core is held.
+- **Drain.** Instructions already issued complete ([FLT-1]). When no core has any left, the chosen
+  core alone may report `{code, pc, warp, lane, info}` (`fault_go`); the dispatcher adds the block.
 - **Settle.** Once every core's memory traffic has settled (store acknowledgements, I-cache fills),
   the dispatcher ends the launch and kills every core, so nothing from the aborted launch reaches the
   next one.

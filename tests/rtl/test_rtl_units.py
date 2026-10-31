@@ -57,9 +57,10 @@ def test_srf():
                extra_env={"RF": "srf", "NR": "5", "NW": "3"})
 
 
-def test_vrf():
-    run_cocotb("mgpu_vrf", sources("core/mgpu_vrf.sv"), "test_regfiles", parameters={"NR": 4, "NW": 5},
-               extra_env={"RF": "vrf", "NR": "4", "NW": "5"})
+@pytest.mark.parametrize("lanes", [8, 32])
+def test_vrf(lanes):
+    run_cocotb("mgpu_vrf", sources("common/mgpu_ram.sv", "core/mgpu_vrf.sv"), "test_vrf",
+               parameters={"L": lanes}, extra_env={"L": str(lanes)})
 
 
 VEXEC_SOURCES = (FPU_SOURCES + SFU_SOURCES[2:] + ("units/mgpu_int_lane.sv", "units/mgpu_valu.sv",
@@ -68,7 +69,8 @@ VEXEC_SOURCES = (FPU_SOURCES + SFU_SOURCES[2:] + ("units/mgpu_int_lane.sv", "uni
 
 @pytest.mark.parametrize("kind,lanes,lat", [(0, 8, 2), (0, 32, 2), (1, 8, 4), (1, 4, 4), (2, 2, 8)])
 def test_vexec(kind, lanes, lat):
-    params = {"KIND": kind, "LANES": lanes, "LAT": lat}
+    # the VALU and FPU take one register-file slice per cycle; the SFU narrower ones
+    params = {"KIND": kind, "LANES": lanes, "LAT": lat, "L": lanes if kind < 2 else 8}
     run_cocotb("mgpu_vexec_probe", sources(*dict.fromkeys(VEXEC_SOURCES)), "test_vexec",
                parameters=params, extra_env={k: str(v) for k, v in params.items()})
 

@@ -60,12 +60,13 @@ module mgpu_top
   // sees there is no loop
   logic [C-1:0]       halt /* verilator split_var */;
   logic [C-1:0]       fault_issue /* verilator split_var */;
-  logic [C-1:0]       fault_valid;
+  logic [C-1:0]       fault_valid, fault_det, fault_go;
+  logic [C-1:0][31:0] fault_clk;
   logic [C-1:0][31:0] block_id, fault_pc, fault_info;
   logic [C-1:0][7:0]  fault_code;
   logic [C-1:0][4:0]  fault_warp, fault_lane;
   logic [5:0]         num_warps;
-  logic               kill, fault_go, busy;
+  logic               kill, busy;
   mgpu_dispatcher #(.C(C), .W(W)) u_disp (.*);
 
   always_comb begin
@@ -92,7 +93,8 @@ module mgpu_top
         .start(start[c]), .kill, .new_launch(new_launch[c]), .entry, .block_id(block_id[c]),
         .block_dim, .grid_dim, .num_warps, .args, .mem_last(MEM_LAST[31:0]),
         .idle(idle[c]), .block_done(block_done[c]),
-        .halt_in(halt[c]), .fault_go, .fault_issue(fault_issue[c]), .busy_ops(busy_ops[c]),
+        .halt_in(halt[c]), .fault_go(fault_go[c]), .fault_issue(fault_issue[c]),
+        .fault_det(fault_det[c]), .fault_clk(fault_clk[c]), .busy_ops(busy_ops[c]),
         .mem_quiet(mem_quiet[c]),
         .if_req_valid(if_req_valid[c]), .if_req_addr(if_req_addr[c]), .if_req_id(if_req_id[c]),
         .if_resp_valid(if_resp_valid[c]), .if_resp_id(if_resp_id[c]), .if_resp_data(if_resp_data[c]),

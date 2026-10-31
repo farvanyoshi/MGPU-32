@@ -3,13 +3,15 @@
 // Pipeline, for an instruction issued at cycle t (core.md 11.2):
 //   t      schedule: round-robin choice among ready warps whose unit is free at t + 2;
 //          operands are read (all 32 lanes) and the issue packet is formed
-//   t + 1  packet register
-//   t + 2  the packet enters its unit (SALU, VALU, FPU, SFU; LSU in a later stage)
+//   t + 1  packet register; the warp's vector operands are read, one pass per cycle in
+//          t + 1 .. t + P, from its register-file bank
+//   t + 2  the packet enters its unit; operand slice p arrives in t + 2 + p
 //   c      the unit presents the retire record; registers are written at the end of c
 //          and the warp may issue again at c + 1
 //
-// Faults are detected at issue. The core stops issuing, lets every instruction already in
-// flight retire, and then reports the fault record (no earlier than t + 3).
+// Faults are detected at issue, or by the LSU with its address analysis (t + 1 + P). The
+// core stops issuing, lets every other instruction in flight retire, and then reports the
+// fault record when the dispatcher allows it.
 //
 // The retire port carries one record per completed instruction on NRET channels (one per
 // writer, mgpu_core_pkg). A testbench consumes a cycle's records in channel order.
@@ -22,6 +24,7 @@ module mgpu_core
     parameter int S     = 2,
     parameter int LINES = 16,
     localparam int P    = 32 / L,
+    localparam int PB   = (P > 1) ? $clog2(P) : 1,
     localparam int WB   = (W > 1) ? $clog2(W) : 1
 ) (
     input  logic                    clk,
@@ -43,6 +46,8 @@ module mgpu_core
     input  logic                    halt_in,      // issue nothing this cycle (another core faulted)
     input  logic                    fault_go,     // every core has drained: the fault may be reported
     output logic                    fault_issue,  // a faulting instruction issues this cycle
+    output logic                    fault_det,    // a fault is detected this cycle (at issue, or by the LSU)
+    output logic [31:0]             fault_clk,    // its instruction's issue clock (CLOCK)
     output logic                    busy_ops,     // instructions in flight (other than a fault)
     output logic                    mem_quiet,    // no memory request outstanding
     // I-fetch memory port
@@ -130,6 +135,15 @@ module mgpu_core
 
   // ------------------------------------------------------------------ scheduler
   logic [4:0][7:0] rem;                 // cycles until free_at(U), saturating at 0
+  logic [4:0][7:0] rem_eff;             // with the LSU's occupancy, when reported this cycle
+  logic            lsu_wait;            // an LSU instruction waits for its occupancy report
+  always_comb begin
+    // the report belongs to the waiting instruction: no LSU instruction issues after it
+    // until then (an instruction whose occupancy was known at issue has no report to wait for)
+    rem_eff = rem;
+    if (lsu_wait && lsu_occ_valid) rem_eff[U_LSU] = lsu_occ_n + 8'd1;
+    if (lsu_wait && lsu_fault) rem_eff[U_LSU] = 8'd0;
+  end
   logic [W-1:0]    ready, issuable;
   logic [W-1:0][2:0] wunit;
   logic            g_any;
@@ -150,9 +164,9 @@ module mgpu_core
   always_comb begin
     for (int w = 0; w < W; w++) begin
       wunit[w] = unit_slot(ibuf_ctrl[w].unit, ibuf_ff[w] || ibuf_ctrl[w].illegal);
-      ready[w] = active && !halt && !halt_in && live[w] && !exited[w] && !in_flight[w] && ibuf_valid[w]
+      ready[w] = active && !halt && !halt_in && !lsu_fault && live[w] && !exited[w] && !in_flight[w] && ibuf_valid[w]
                  && !(wait_bar[w] && !release_now) && !(wait_fence[w] && stores_out[w] != 6'd0);
-      issuable[w] = ready[w] && rem[wunit[w]] <= 8'd2;
+      issuable[w] = ready[w] && rem_eff[wunit[w]] <= 8'd2;
     end
     g_any = 1'b0;
     g = 0;
@@ -171,18 +185,14 @@ module mgpu_core
   logic [4:0][WB-1:0] s_rwarp;
   logic [4:0][4:0]    s_raddr;
   logic [4:0][31:0]   s_rdata;
-  logic [3:0][WB-1:0] v_rwarp;
-  logic [3:0][4:0]    v_raddr;
-  logic [3:0][31:0][31:0] v_rdata;
   assign c0 = ibuf_ctrl[g];
   assign s_rwarp = {5{WB'(g)}};
   assign s_raddr = {5'd31, c0.rd, c0.rc, c0.rb, c0.ra};
-  assign v_rwarp = {4{WB'(g)}};
-  assign v_raddr = {c0.rd, c0.rc, c0.rb, c0.ra};
 
-  // special registers ([SR-3]: CLOCK at the issue cycle)
-  logic [31:0]       sr_uniform;
-  logic [31:0][31:0] sr_vec;
+  // special registers ([SR-3]: CLOCK at the issue cycle); a lane value is
+  // base + (linear ? lane : 0)
+  logic [31:0] sr_uniform, sr_base;
+  logic        sr_lin;
   always_comb begin
     unique case (c0.ra)
       SR_BLOCK_ID:  sr_uniform = r_block_id;
@@ -192,24 +202,17 @@ module mgpu_core
       SR_NUM_WARPS: sr_uniform = 32'(r_num_warps);
       default:      sr_uniform = bclk;           // SR_CLOCK
     endcase
-    for (int i = 0; i < 32; i++) begin
-      unique case (c0.ra)
-        SR_TID:     sr_vec[i] = 32'(32 * g + i);
-        SR_LANE_ID: sr_vec[i] = 32'(i);
-        SR_GTID:    sr_vec[i] = r_block_id * r_block_dim + 32'(32 * g + i);
-        default:    sr_vec[i] = sr_uniform;
-      endcase
-    end
+    sr_lin = 1'b1;
+    unique case (c0.ra)
+      SR_TID:     sr_base = 32'(32 * g);
+      SR_LANE_ID: sr_base = 32'd0;
+      SR_GTID:    sr_base = r_block_id * r_block_dim + 32'(32 * g);
+      default: begin
+        sr_base = sr_uniform;
+        sr_lin = 1'b0;
+      end
+    endcase
   end
-
-  lsu_info_t   li0;
-  logic        af;               // LSU address fault
-  logic [7:0]  af_code;
-  logic [4:0]  af_lane;
-  logic [31:0] af_info;
-  mgpu_agen u_agen (.ctrl(c0), .exec(s_rdata[4]), .sa(s_rdata[0]), .sd(s_rdata[3]),
-                    .va(v_rdata[0]), .vb(p0.vb), .vd(v_rdata[3]), .mem_last,
-                    .info(li0), .fault(af), .fcode(af_code), .flane(af_lane), .finfo(af_info));
 
   ipkt_t       p0;
   logic        bf;               // barrier PC mismatch ([BAR-2])
@@ -233,10 +236,7 @@ module mgpu_core
     p0.sb = bs;
     p0.sc = s_rdata[2];
     p0.sd = s_rdata[3];
-    p0.va = v_rdata[0];
-    p0.vb = (c0.sb || c0.b_imm) ? {32{bs}} : v_rdata[1];
-    p0.vc = v_rdata[2];
-    p0.vd = v_rdata[3];
+    p0.bcast = c0.sb || c0.b_imm;
     if (c0.op == OP_S_GETSR) begin       // executes as S_ADD sd, sr, 0
       p0.ctrl.op = OP_S_ADD;
       p0.sa = sr_uniform;
@@ -244,16 +244,19 @@ module mgpu_core
     end
     if (c0.op == OP_V_GETSR) begin       // executes as V_ADD vd, sr, 0 (VALU timing)
       p0.ctrl.op = OP_V_ADD;
-      p0.va = sr_vec;
-      p0.vb = '0;
+      p0.gsr = 1'b1;
+      p0.gsr_lin = sr_lin;
+      p0.gsr_base = sr_base;
+      p0.bcast = 1'b1;
+      p0.sb = '0;
     end
     u0 = wunit[g];
     bf = !ibuf_ff[g] && !c0.illegal && c0.op == OP_BAR && bar_active && !release_now
          && pc[g] != bar_pc;
-    f0 = ibuf_ff[g] || c0.illegal || (u0 == 3'(U_LSU) && af) || bf;
-    f0_code = ibuf_ff[g] ? E_RANGE : c0.illegal ? E_ILLEGAL : bf ? E_BARRIER : af_code;
-    f0_lane = (ibuf_ff[g] || c0.illegal || bf) ? 5'd0 : af_lane;
-    f0_info = ibuf_ff[g] ? pc[g] : c0.illegal ? ibuf_word[g] : bf ? bar_pc : af_info;
+    f0 = ibuf_ff[g] || c0.illegal || bf;
+    f0_code = ibuf_ff[g] ? E_RANGE : c0.illegal ? E_ILLEGAL : E_BARRIER;
+    f0_lane = '0;
+    f0_info = ibuf_ff[g] ? pc[g] : c0.illegal ? ibuf_word[g] : bar_pc;
   end
 
   // occupancy of the issued instruction (core.md 7)
@@ -263,8 +266,12 @@ module mgpu_core
       3'(U_VALU): occ0 = (c0.op == OP_V_SHFL || c0.op == OP_V_READLANE) ? 8'(2 * P) : 8'(P);
       3'(U_FPU):  occ0 = 8'(P);
       3'(U_SFU):  occ0 = 8'(32 / S);
-      3'(U_LSU):  occ0 = 8'(P) + (!c0.mem_shared ? 8'(li0.n_seg)
-                                 : !is_load(c0.op) && !is_store(c0.op) ? 8'(li0.n_act) : 8'(li0.d));
+      // known at issue only for scalar accesses (one segment) and EXEC = 0 (no lane: no
+      // segment, a single empty bank round, no atomic step); otherwise the LSU reports it
+      // with its address analysis at t + 1 + P, and the unit counts as busy until then
+      3'(U_LSU):  occ0 = is_scalar_mem(c0.op) ? 8'(P + 1)
+                       : s_rdata[4] != 32'd0 ? 8'd254
+                       : 8'(P) + 8'(c0.mem_shared && (is_load(c0.op) || is_store(c0.op)));
       default:    occ0 = 8'd1;
     endcase
   end
@@ -272,7 +279,6 @@ module mgpu_core
   // ------------------------------------------------------------------ packet pipeline
   typedef struct packed {
     ipkt_t       p;
-    lsu_info_t   li;
     logic [2:0]  unit;
     logic        fault;
     logic [7:0]  fcode;
@@ -285,7 +291,7 @@ module mgpu_core
       st1 <= '0;
       st2 <= '0;
     end else begin
-      st1 <= '{p: p0, li: li0, unit: u0, fault: f0, fcode: f0_code, flane: f0_lane, finfo: f0_info};
+      st1 <= '{p: p0, unit: u0, fault: f0, fcode: f0_code, flane: f0_lane, finfo: f0_info};
       st2 <= st1;
     end
   end
@@ -300,32 +306,98 @@ module mgpu_core
   /* verilator lint_on UNUSEDSIGNAL */
 
   // ------------------------------------------------------------------ execution units
+  // ------------------------------------------------------------------ vector register file
+  // Each warp's operands are read by its own sequencer, one pass per cycle in t + 1 .. t + P
+  // (copies: 0 va = V[ra], 1 vb = V[rb], 2 vc = V[rc], 3 old vd = V[rd]).
+  logic [W-1:0]                     rs_on, v_re;
+  logic [W-1:0][PB-1:0]             rs_pass;
+  logic [W-1:0][3:0][4:0]           rs_reg;
+  logic [W-1:0][3:0][L-1:0][31:0]   v_rdata;
+  vwr_t [5:0]                       vw;
+  logic [5:0]                       v_we;
+  logic [5:0][WB-1:0]               v_wwarp;
+  logic [5:0][4:0]                  v_wreg;
+  logic [5:0][31:0]                 v_wmask;
+  logic [5:0][31:0][31:0]           v_wdata;
+  assign v_re = rs_on;
+  always_comb begin
+    for (int i = 0; i < 6; i++) begin
+      v_we[i] = vw[i].valid;
+      v_wwarp[i] = WB'(vw[i].warp);
+      v_wreg[i] = vw[i].rd;
+      v_wmask[i] = vw[i].mask;
+      v_wdata[i] = vw[i].data;
+    end
+  end
+  mgpu_vrf #(.W(W), .L(L), .NC(4), .NW(6)) u_vrf (
+      .clk, .init(accept), .re(v_re), .rpass(rs_pass), .rreg(rs_reg), .rdata(v_rdata),
+      .we(v_we), .wwarp(v_wwarp), .wreg(v_wreg), .wmask(v_wmask), .wdata(v_wdata));
+
+  // the bank each vector unit takes its slices from: the warp of its latest instruction
+  logic [4:0][WB-1:0] ubank;
+  always_ff @(posedge clk) begin
+    if (st1.p.valid && !st1.fault) ubank[st1.unit] <= WB'(st1.p.warp);
+  end
+
+  // ------------------------------------------------------------------ execution units
   retire_t r_salu, r_valu, r_fpu, r_sfu, r_lsu_s, r_lsu_a, r_lsu_b, r_lsu_c;
   logic    salu_fence;
   mgpu_salu u_salu (.clk, .rst_n, .in(to_unit(st2, U_SALU)), .out(r_salu), .br_valid, .br_pc,
                     .fence(salu_fence));
-  mgpu_vexec #(.KIND(0), .LANES(L), .LAT(2)) u_valu (.clk, .rst_n, .in(to_unit(st2, U_VALU)), .out(r_valu));
-  mgpu_vexec #(.KIND(1), .LANES(L), .LAT(4)) u_fpu (.clk, .rst_n, .in(to_unit(st2, U_FPU)), .out(r_fpu));
-  mgpu_vexec #(.KIND(2), .LANES(S), .LAT(8)) u_sfu (.clk, .rst_n, .in(to_unit(st2, U_SFU)), .out(r_sfu));
-  mgpu_lsu #(.W(W), .P(P)) u_lsu (
-      .clk, .rst_n, .clr(accept), .in(to_unit(st2, U_LSU)), .in_info(st2.li), .req(lsu_req),
+  mgpu_vexec #(.KIND(0), .LANES(L), .LAT(2), .L(L)) u_valu (
+      .clk, .rst_n, .in(to_unit(st2, U_VALU)),
+      .sl_a(v_rdata[ubank[U_VALU]][0]), .sl_b(v_rdata[ubank[U_VALU]][1]),
+      .sl_c(v_rdata[ubank[U_VALU]][2]), .sl_d(v_rdata[ubank[U_VALU]][3]), .vwr(vw[0]), .out(r_valu));
+  mgpu_vexec #(.KIND(1), .LANES(L), .LAT(4), .L(L)) u_fpu (
+      .clk, .rst_n, .in(to_unit(st2, U_FPU)),
+      .sl_a(v_rdata[ubank[U_FPU]][0]), .sl_b(v_rdata[ubank[U_FPU]][1]),
+      .sl_c(v_rdata[ubank[U_FPU]][2]), .sl_d(v_rdata[ubank[U_FPU]][3]), .vwr(vw[1]), .out(r_fpu));
+  mgpu_vexec #(.KIND(2), .LANES(S), .LAT(8), .L(L)) u_sfu (
+      .clk, .rst_n, .in(to_unit(st2, U_SFU)),
+      .sl_a(v_rdata[ubank[U_SFU]][0]), .sl_b(v_rdata[ubank[U_SFU]][1]),
+      .sl_c(v_rdata[ubank[U_SFU]][2]), .sl_d(v_rdata[ubank[U_SFU]][3]), .vwr(vw[2]), .out(r_sfu));
+  logic        lsu_occ_valid, lsu_fault;
+  logic [7:0]  lsu_occ_n, lsu_fcode;
+  logic [4:0]  lsu_flane;
+  logic [31:0] lsu_finfo;
+  ipkt_t       lsu_fpkt;
+  mgpu_lsu #(.W(W), .L(L)) u_lsu (
+      .clk, .rst_n, .clr(accept), .mem_last, .in(to_unit(st2, U_LSU)),
+      .sl_a(v_rdata[ubank[U_LSU]][0]), .sl_b(v_rdata[ubank[U_LSU]][1]), .sl_d(v_rdata[ubank[U_LSU]][3]),
+      .occ_valid(lsu_occ_valid), .occ_n(lsu_occ_n), .fault(lsu_fault), .fault_code(lsu_fcode),
+      .fault_lane(lsu_flane), .fault_info(lsu_finfo), .fault_pkt(lsu_fpkt),
+      .vwr_a(vw[3]), .vwr_b(vw[4]), .vwr_c(vw[5]), .req(lsu_req),
       .rd_valid, .rd_warp, .rd_seg, .rd_data, .at_valid, .at_warp, .at_seg, .at_old,
       .rec_s(r_lsu_s), .rec_a(r_lsu_a), .rec_b(r_lsu_b), .rec_c(r_lsu_c));
 
   // ------------------------------------------------------------------ faults
   retire_t    fq;                 // the fault waiting for in-flight instructions to drain
   logic [4:0] fq_warp;
+  logic       fq_lsu;             // the held fault came from the LSU
   logic       fq_emit;
   logic [W-1:0] others;
   assign others = fq.valid ? in_flight & ~(W'(1) << fq_warp) : in_flight;
   assign busy_ops = |others;
   assign fq_emit = fq.valid && !busy_ops && fault_go;
   assign fault_issue = g_any && f0;
+  assign fault_det = fault_issue || lsu_fault;
+  assign fault_clk = lsu_fault ? lsu_fpkt.clock : bclk;
 
   always_ff @(posedge clk) begin
     if (!rst_n || accept) begin
       fq <= '0;
-    end else if (st2.p.valid && st2.fault) begin
+    end else if (lsu_fault && !(fq.valid && fq_lsu)) begin
+      // issued before a fault taken at issue that is already held: it wins (an earlier LSU
+      // fault is kept: the LSU handles its instructions in issue order)
+      fq_lsu <= 1'b1;
+      fq <= ret_from(lsu_fpkt);
+      fq.event_ <= EV_FAULT;
+      fq.fault_code <= lsu_fcode;
+      fq.fault_lane <= lsu_flane;
+      fq.fault_info <= lsu_finfo;
+      fq_warp <= lsu_fpkt.warp;
+    end else if (st2.p.valid && st2.fault && !fq.valid) begin
+      fq_lsu <= 1'b0;
       fq <= ret_from(st2.p);
       fq.event_ <= EV_FAULT;
       fq.fault_code <= st2.fcode;
@@ -357,19 +429,11 @@ module mgpu_core
   logic [2:0][WB-1:0]    s_wwarp;
   logic [2:0][4:0]       s_waddr;
   logic [2:0][31:0]      s_wdata;
-  logic [5:0]            v_we;
-  logic [5:0][WB-1:0]    v_wwarp;
-  logic [5:0][4:0]       v_waddr;
-  logic [5:0][31:0][31:0] v_wdata;
   always_comb begin
     s_we = '0;
     s_wwarp = '0;
     s_waddr = '0;
     s_wdata = '0;
-    v_we = '0;
-    v_wwarp = '0;
-    v_waddr = '0;
-    v_wdata = '0;
     // scalar ports: SALU, VALU (V_CMP, V_READLANE), LSU response path (S_LW)
     s_we[0] = r_salu.valid && r_salu.sw_valid;
     s_wwarp[0] = WB'(r_salu.warp);
@@ -383,31 +447,6 @@ module mgpu_core
     s_wwarp[2] = WB'(r_lsu_b.warp);
     s_waddr[2] = r_lsu_b.sw_reg;
     s_wdata[2] = r_lsu_b.sw_val;
-    // vector ports: VALU, FPU, SFU, LSU (shared, loads, atomics)
-    v_we[0] = r_valu.valid && r_valu.vw_valid;
-    v_wwarp[0] = WB'(r_valu.warp);
-    v_waddr[0] = r_valu.vw_reg;
-    v_wdata[0] = r_valu.vw_val;
-    v_we[1] = r_fpu.valid && r_fpu.vw_valid;
-    v_wwarp[1] = WB'(r_fpu.warp);
-    v_waddr[1] = r_fpu.vw_reg;
-    v_wdata[1] = r_fpu.vw_val;
-    v_we[2] = r_sfu.valid && r_sfu.vw_valid;
-    v_wwarp[2] = WB'(r_sfu.warp);
-    v_waddr[2] = r_sfu.vw_reg;
-    v_wdata[2] = r_sfu.vw_val;
-    v_we[3] = r_lsu_a.valid && r_lsu_a.vw_valid;
-    v_wwarp[3] = WB'(r_lsu_a.warp);
-    v_waddr[3] = r_lsu_a.vw_reg;
-    v_wdata[3] = r_lsu_a.vw_val;
-    v_we[4] = r_lsu_b.valid && r_lsu_b.vw_valid;
-    v_wwarp[4] = WB'(r_lsu_b.warp);
-    v_waddr[4] = r_lsu_b.vw_reg;
-    v_wdata[4] = r_lsu_b.vw_val;
-    v_we[5] = r_lsu_c.valid && r_lsu_c.vw_valid;
-    v_wwarp[5] = WB'(r_lsu_c.warp);
-    v_waddr[5] = r_lsu_c.vw_reg;
-    v_wdata[5] = r_lsu_c.vw_val;
   end
 
   logic [W-1:0][31:0] init_exec;
@@ -423,9 +462,6 @@ module mgpu_core
       .clk, .rwarp(s_rwarp), .raddr(s_raddr), .rdata(s_rdata),
       .we(s_we), .wwarp(s_wwarp), .waddr(s_waddr), .wdata(s_wdata),
       .init(accept), .init_args(args), .init_exec);
-  mgpu_vrf #(.W(W), .NR(4), .NW(6)) u_vrf (
-      .clk, .rwarp(v_rwarp), .raddr(v_raddr), .rdata(v_rdata),
-      .we(v_we), .wwarp(v_wwarp), .waddr(v_waddr), .wdata(v_wdata), .init(accept));
 
   // ------------------------------------------------------------------ control state
   logic all_exited;
@@ -461,6 +497,8 @@ module mgpu_core
       fetch_pend <= '0;
       stores_out <= '0;
       rem <= '0;
+      lsu_wait <= 1'b0;
+      rs_on <= '0;
       rr <= '0;
       boot <= '0;
     end else if (accept) begin
@@ -488,7 +526,23 @@ module mgpu_core
       bclk <= bclk + 32'd1;
       if (int'(boot) <= W) boot <= boot + 6'd1;
       if (block_done) active <= 1'b0;
-      for (int u = 0; u < 5; u++) if (rem[u] != 0) rem[u] <= rem[u] - 8'd1;
+      for (int u = 0; u < 5; u++) rem[u] <= rem_eff[u] != 8'd0 ? rem_eff[u] - 8'd1 : 8'd0;
+      if (lsu_occ_valid || lsu_fault) lsu_wait <= 1'b0;
+      // operand read sequencers
+      for (int w = 0; w < W; w++) begin
+        if (rs_on[w]) begin
+          rs_pass[w] <= rs_pass[w] + 1'b1;
+          if (int'(rs_pass[w]) == P - 1) rs_on[w] <= 1'b0;
+        end
+      end
+      // an LSU fault halts the core; it replaces (or prevents) a fault taken at issue,
+      // whose instruction issued later, and that instruction's warp is finished
+      if (lsu_fault) begin
+        halt <= 1'b1;
+        if (fq.valid && fq_lsu) in_flight[WB'(lsu_fpkt.warp)] <= 1'b0;   // a later LSU fault: dropped
+        else if (fq.valid) in_flight[WB'(fq_warp)] <= 1'b0;             // replaces a fault taken at issue
+      end
+      if (st2.p.valid && st2.fault && (fq.valid || lsu_fault)) in_flight[WB'(st2.p.warp)] <= 1'b0;
 
       // fetch grants and branch fetch requests
       for (int w = 0; w < W; w++) begin
@@ -528,6 +582,12 @@ module mgpu_core
         rr <= WB'((g + 1) % W);
         in_flight[g] <= 1'b1;
         rem[u0] <= occ0 + 8'd1;
+        if (u0 == 3'(U_LSU) && !f0) lsu_wait <= occ0 == 8'd254;
+        if (!f0 && u0 != 3'(U_SALU)) begin   // vector operands: P passes from t + 1
+          rs_on[g] <= 1'b1;
+          rs_pass[g] <= '0;
+          rs_reg[g] <= {c0.rd, c0.rc, c0.rb, c0.ra};
+        end
         if (!f0 && c0.op == OP_BAR) begin
           bar_active <= 1'b1;
           bar_pc <= pc[g];

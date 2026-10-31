@@ -22,6 +22,9 @@ class FakeCore:
         self.quiet_in = 0       # cycles until memory traffic settles
         self.fault_pending = False
         self.block = None
+        self.start = 0          # launch cycle of the block start
+        self.late = None        # [cycles until detection, issue clock] of an LSU fault
+        self.late_kind = False
 
 
 def bits(vals):
@@ -31,7 +34,7 @@ def bits(vals):
 async def reset(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     dut.rst_n.value = 0
-    for s in ("launch", "idle", "block_done", "fault_issue", "busy_ops", "fault_valid"):
+    for s in ("launch", "idle", "block_done", "fault_issue", "fault_det", "busy_ops", "fault_valid"):
         getattr(dut, s).value = 0
     dut.mem_quiet.value = (1 << C) - 1
     dut.idle.value = (1 << C) - 1
@@ -45,7 +48,7 @@ async def launch(dut, rng, entry, grid, block, fault_prob):
     cores = [FakeCore() for _ in range(C)]
     fresh = [True] * C
     next_block = done = 0
-    fault_seen, fault_core, t_fault, status, quiet_wait = False, None, None, None, False
+    fault_seen, best, t_fault, status, quiet_wait = False, None, None, None, False
     dut.entry.value, dut.grid_dim.value, dut.block_dim.value = entry, grid, block
     await FallingEdge(dut.clk)
     dut.launch.value = 1
@@ -54,19 +57,23 @@ async def launch(dut, rng, entry, grid, block, fault_prob):
         # ---- stand-in core outputs for this cycle
         idle = [not k.active for k in cores]
         bdone = [k.done_pulse for k in cores]
-        issue = [k.fault_at == 0 and not fault_seen for k in cores]
-        # a fault at issue holds the higher cores in this cycle: only the lowest one issues
-        first = next((i for i in range(C) if issue[i]), None)
-        issue = [i == first for i in range(C)]
+        # faulting instructions issue unless held: a fault at issue holds the higher cores
+        # in its cycle; an LSU fault is detected 5 cycles after its issue
+        issuing = [k.fault_at == 0 and not fault_seen for k in cores]
+        first = next((i for i in range(C) if issuing[i]), None)
+        issuing = [i == first for i in range(C)]
+        issue = [issuing[i] and cores[i].late_kind is False for i in range(C)]
+        det = [issue[i] or (cores[i].late is not None and cores[i].late[0] == 0) for i in range(C)]
+        clk = [cyc - cores[i].start if issue[i] else (cores[i].late[1] if det[i] else 0) for i in range(C)]
         busy = [k.active and k.drain > 0 for k in cores]
         quiet = [k.quiet_in == 0 for k in cores]
-        fvalid = [k.fault_pending and not any(busy) and k.drain == 0 for k in cores]
+        go = [not any(busy) and fault_seen and best is not None and best[1] == i for i in range(C)]
+        fvalid = [cores[i].fault_pending and go[i] for i in range(C)]
         dut.idle.value, dut.block_done.value = bits(idle), bits(bdone)
         dut.fault_issue.value, dut.busy_ops.value = bits(issue), bits(busy)
+        dut.fault_det.value = bits(det)
+        dut.fault_clk.value = sum((c & 0xFFFFFFFF) << (32 * i) for i, c in enumerate(clk))
         dut.mem_quiet.value, dut.fault_valid.value = bits(quiet), bits(fvalid)
-        for i, k in enumerate(cores):
-            if fvalid[i]:
-                getattr(dut, "fault_code").value = sum(((3 + i) & 0xFF) << (8 * j) for j in range(C))
         codes = [(3 + i) & 0xFF for i in range(C)]
         dut.fault_code.value = sum(c << (8 * i) for i, c in enumerate(codes))
         dut.fault_pc.value = sum((0x1000 + 4 * i) << (32 * i) for i in range(C))
@@ -105,7 +112,7 @@ async def launch(dut, rng, entry, grid, block, fault_prob):
                 assert (int(dut.new_launch.value) >> i & 1) == fresh[i], f"cycle {cyc}: new_launch"
         if cyc > 0:
             assert [int(dut.halt.value) >> i & 1 for i in range(C)] == [int(x) for x in exp_halt], f"cycle {cyc}: halt"
-            assert int(dut.fault_go.value) == int(not any(busy)), f"cycle {cyc}: fault_go"
+            assert [int(dut.fault_go.value) >> i & 1 for i in range(C)] == [int(x) for x in go], f"cycle {cyc}: fault_go"
         assert int(dut.end_valid.value) == int(exp_end is not None), f"cycle {cyc}: end_valid"
         if exp_end:
             st = [(int(dut.end_status.value) >> (32 * i)) & 0xFFFFFFFF for i in range(6)]
@@ -119,10 +126,21 @@ async def launch(dut, rng, entry, grid, block, fault_prob):
             return exp_end
         assert int(dut.live_cycles.value) == cyc
         # ---- advance the reference and the stand-in cores
-        if any(issue):
-            fault_seen, fault_core, t_fault = True, first, cyc
-            k = cores[first]
-            k.fault_pending, k.fault_at = True, None
+        for i in range(C):
+            if issuing[i]:
+                k = cores[i]
+                k.fault_at = None
+                if k.late_kind:
+                    k.late = [5, cyc - k.start]
+        for i in range(C):
+            if det[i]:
+                t = cores[i].start + clk[i]
+                if best is None or (t, i) < best:
+                    best = (t, i)
+                    t_fault = t
+                cores[i].fault_pending = True
+                cores[i].late = None
+                fault_seen = True
         for i, k in enumerate(cores):
             if fvalid[i]:
                 status = [codes[i], 0x1000 + 4 * i, k.block, i + 1, 2 * i, 0xABC0 + i]
@@ -133,6 +151,8 @@ async def launch(dut, rng, entry, grid, block, fault_prob):
             k.done_pulse = False
             if k.fault_at:
                 k.fault_at -= 1
+            if k.late is not None:
+                k.late[0] -= 1
             if k.drain:
                 k.drain -= 1
             if k.quiet_in:
@@ -143,8 +163,9 @@ async def launch(dut, rng, entry, grid, block, fault_prob):
                     k.active, k.done_pulse = False, True
             if exp_start[i]:
                 fresh[i] = False
-                k.active, k.left, k.block = True, rng.randint(2, 30), exp_ids[i]
+                k.active, k.left, k.block, k.start = True, rng.randint(2, 30), exp_ids[i], cyc
                 k.fault_at = rng.randint(1, 20) if rng.random() < fault_prob else None
+                k.late_kind = rng.random() < 0.5
                 k.drain, k.quiet_in = rng.randint(0, 6), rng.randint(0, 12)
         next_block += sum(exp_start)
         if fault_seen:

@@ -298,7 +298,19 @@ class Lockstep:
                     self.dump.write(f"F {now} {int(dut.if_req_addr.value):#x} {int(dut.if_req_id.value)}\n")
             await RisingEdge(dut.clk)
         else:
-            raise LockstepError(f"no completion after {max_cycles} cycles")
+            state = ""
+            for name in ("in_flight", "ready", "rem", "ibuf_valid", "halt", "active", "wait_bar",
+                         "wait_fence", "exited", "rs_on", "stores_out", "pc", "u_lsu.busy",
+                         "u_lsu.cnt", "u_lsu.ow_pend", "u_lsu.done_b", "u_lsu.pw_cnt"):
+                try:
+                    h = dut
+                    for part in name.split("."):
+                        h = getattr(h, part)
+                    v = h.value
+                    state += f" {name}={int(v):#x}" if name == "pc" else f" {name}={v}"
+                except (AttributeError, ValueError):
+                    pass
+            raise LockstepError(f"no completion after {max_cycles} cycles;{state}")
         dut.start.value = 0
         self._finish(fault)
         return Result(end, len(self.records), fault, self.records)
