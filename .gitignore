@@ -7,3 +7,6 @@ dist/
 target/
 *.so
 .venv/
+*.result.xml
+results.xml
+sim_build/

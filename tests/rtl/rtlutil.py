@@ -55,8 +55,12 @@ def run_cocotb(top: str, srcs: list, test_module: str, parameters: dict | None =
     runner.build(sources=[str(s) for s in srcs], hdl_toplevel=top, build_dir=str(build_dir),
                  parameters=params, build_args=["-Wall", "-Wno-fatal", "-O3"], always=False)
     env = dict(extra_env or {})
+    tbdir = str(ROOT / "tb" / "cocotb")
+    env["PYTHONPATH"] = tbdir + os.pathsep + os.environ.get("PYTHONPATH", "")
+    # run in the build directory so result files never land in the source tree
     results = runner.test(hdl_toplevel=top, test_module=test_module, build_dir=str(build_dir),
-                          test_dir=str(ROOT / "tb" / "cocotb"), extra_env=env)
+                          test_dir=str(build_dir), extra_env=env,
+                          results_xml=str(build_dir / f"results{tag}.xml"))
     from cocotb_tools.runner import get_results
     total, failed = get_results(results)
     assert failed == 0, f"{failed} of {total} cocotb tests failed for {top} (see {build_dir})"
