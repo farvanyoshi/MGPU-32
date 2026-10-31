@@ -60,9 +60,73 @@ package mgpu_core_pkg;
   // Record events.
   localparam logic [1:0] EV_NONE = 2'd0, EV_EXIT = 2'd1, EV_BAR = 2'd2, EV_FAULT = 2'd3;
 
-  // Retire channels, in the order the testbench consumes a cycle's records.
-  localparam int NRET = 7;
-  localparam int R_SALU = 0, R_VALU = 1, R_FPU = 2, R_SFU = 3, R_LSU_A = 4, R_LSU_B = 5, R_FAULT = 6;
+  // Retire channels, in the order the testbench consumes a cycle's records. The LSU has
+  // four, so that no channel ever carries two records in a cycle: stores (LSU_S, at their
+  // last request), shared accesses and empty global loads/atomics (LSU_A, after the unit's
+  // occupancy), global loads (LSU_B) and global atomics (LSU_C) at their last response + 1.
+  localparam int NRET = 9;
+  localparam int R_SALU = 0, R_VALU = 1, R_FPU = 2, R_SFU = 3, R_LSU_S = 4, R_LSU_A = 5,
+                 R_LSU_B = 6, R_LSU_C = 7, R_FAULT = 8;
+
+  // LSU access analysis, computed at issue (mgpu_agen).
+  typedef struct packed {
+    logic [31:0]       lanes;     // lanes that access memory
+    logic [31:0][31:0] addr;      // byte address of each lane
+    logic [31:0][31:0] data;      // store data or atomic operand of each lane
+    logic [5:0]        n_seg;     // global: distinct 128-byte segments
+    logic [31:0][4:0]  seg;       // global: segment index of each lane (order of lowest lane)
+    logic [5:0]        d;         // shared: bank-conflict degree (at least 1)
+    logic [31:0][4:0]  round;     // shared: bank round of each lane
+    logic [5:0]        n_act;     // number of accessing lanes
+  } lsu_info_t;
+
+  // A segment request on the LSU memory port (interfaces.md 2).
+  localparam logic [1:0] MK_READ = 2'd0, MK_WRITE = 2'd1, MK_ATOMIC = 2'd2;
+  typedef struct packed {
+    logic              valid;
+    logic [1:0]        kind;
+    logic [4:0]        warp;      // tag: warp and segment index
+    logic [4:0]        seg;
+    logic [31:0]       addr;      // segment base address
+    logic [31:0]       wmask;     // WRITE: words written
+    logic [31:0][31:0] wdata;     // WRITE: segment data (highest lane wins)
+    logic [31:0]       lanes;     // ATOMIC: lanes of this segment, applied in ascending order
+    logic [31:0][4:0]  off;       // ATOMIC: word offset of each lane
+    logic [31:0][31:0] opnd;      // ATOMIC: operand of each lane
+    logic [2:0]        aop;       // ATOMIC: operation (atom_kind)
+  } mreq_t;
+
+  function automatic logic is_load(input op_e op);
+    return op inside {OP_S_LW, OP_V_LW, OP_V_LDS};
+  endfunction
+  function automatic logic is_store(input op_e op);
+    return op inside {OP_S_SW, OP_V_SW, OP_V_STS};
+  endfunction
+  function automatic logic is_scalar_mem(input op_e op);
+    return op inside {OP_S_LW, OP_S_SW};
+  endfunction
+  // V_ATOM operations (ISA 6.9): 0 add, 1 min, 2 max, 3 xchg, 4 and, 5 or.
+  function automatic logic [2:0] atom_kind(input op_e op);
+    unique case (op)
+      OP_V_ATOM_MIN, OP_V_ATOM_MIN_S:   return 3'd1;
+      OP_V_ATOM_MAX, OP_V_ATOM_MAX_S:   return 3'd2;
+      OP_V_ATOM_XCHG, OP_V_ATOM_XCHG_S: return 3'd3;
+      OP_V_ATOM_AND, OP_V_ATOM_AND_S:   return 3'd4;
+      OP_V_ATOM_OR, OP_V_ATOM_OR_S:     return 3'd5;
+      default:                          return 3'd0;
+    endcase
+  endfunction
+  function automatic logic [31:0] atom_apply(input logic [2:0] k, input logic [31:0] old,
+                                             input logic [31:0] x);
+    unique case (k)
+      3'd1:    return $signed(old) <= $signed(x) ? old : x;
+      3'd2:    return $signed(old) >= $signed(x) ? old : x;
+      3'd3:    return x;
+      3'd4:    return old & x;
+      3'd5:    return old | x;
+      default: return old + x;
+    endcase
+  endfunction
 
   /* verilator lint_off UNUSEDSIGNAL */  // only the identity fields of the packet are used
   function automatic retire_t ret_from(input ipkt_t p);

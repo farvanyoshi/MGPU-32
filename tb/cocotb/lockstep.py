@@ -21,8 +21,16 @@ from mgpu.trace import CommitRecord, from_tuple
 from memory import Memory
 
 PKG = Path(__file__).resolve().parents[2] / "rtl/pkg/mgpu_core_pkg.sv"
-NRET = 7
-CHANNELS = ["salu", "valu", "fpu", "sfu", "lsu_a", "lsu_b", "fault"]
+
+
+def _channels() -> list[str]:
+    """Retire channel names in index order (the R_* parameters of mgpu_core_pkg.sv)."""
+    found = re.findall(r"\bR_(\w+)\s*=\s*(\d+)", PKG.read_text())
+    return [n.lower() for n, _ in sorted(found, key=lambda x: int(x[1]))]
+
+
+CHANNELS = _channels()
+NRET = len(CHANNELS)
 
 
 def _struct_fields(name: str) -> list[tuple[str, int]]:
@@ -43,16 +51,23 @@ def _struct_fields(name: str) -> list[tuple[str, int]]:
     return fields
 
 
-RETIRE_FIELDS = _struct_fields("retire_t")
-RETIRE_WIDTH = sum(w for _, w in RETIRE_FIELDS)
+class Struct:
+    """Field decoder for a packed struct of mgpu_core_pkg.sv."""
+
+    def __init__(self, name: str):
+        self.fields = _struct_fields(name)
+        self.width = sum(w for _, w in self.fields)
+
+    def decode(self, value: int) -> dict:
+        out, pos = {}, self.width
+        for name, width in self.fields:
+            pos -= width
+            out[name] = (value >> pos) & ((1 << width) - 1)
+        return out
 
 
-def decode_retire(value: int) -> dict:
-    out, pos = {}, RETIRE_WIDTH
-    for name, width in RETIRE_FIELDS:
-        pos -= width
-        out[name] = (value >> pos) & ((1 << width) - 1)
-    return out
+RETIRE = Struct("retire_t")
+MREQ = Struct("mreq_t")
 
 
 def lanes(value: int) -> tuple:
@@ -95,6 +110,9 @@ def ensure_clock(dut) -> None:
 class Lockstep:
     def __init__(self, dut, launch: Launch, warps: int, t_mem: int = 100, t_seg: int = 8):
         self.dut, self.ln, self.W = dut, launch, warps
+        # With one warp per block nothing depends on the schedule, so atomic values are
+        # compared too; otherwise rule E4 (warp_key, C-37) applies.
+        self.strict = launch.block <= 32
         self.mem = Memory(launch.mem_size, t_mem, t_seg)
         self.gpu = _core.Gpu(mem_size=launch.mem_size, max_block_dim=32 * warps)
         self._load(launch.entry, launch.words)
@@ -119,6 +137,11 @@ class Lockstep:
         if r["vw_valid"]:
             rec.vwrite = (r["vw_reg"], lanes(r["vw_val"]))
         rec.exec_after = r["exec_after"]
+        space = 1 if r["mw_shared"] else 0
+        for lane in range(32):
+            if r["mw_lanes"] >> lane & 1:
+                rec.mwrites.append((space, (r["mw_addr"] >> (32 * lane)) & 0xFFFFFFFF,
+                                    (r["mw_val"] >> (32 * lane)) & 0xFFFFFFFF))
         rec.event = r["event_"]
         if rec.event == 3:
             rec.fault = (r["fault_code"], r["fault_lane"], r["fault_info"])
@@ -131,13 +154,18 @@ class Lockstep:
             eng = from_tuple(self.gpu.step(block, rtl.warp))
         except Exception as e:
             raise LockstepError(f"cycle {now}: engine cannot step ({block}, {rtl.warp}): {e}") from e
-        if rtl.warp_key() != eng.warp_key():
+        if self._key(rtl) != self._key(eng):
             raise LockstepError(
                 f"cycle {now}, {CHANNELS[chan]} channel, block {block} warp {rtl.warp} "
                 f"pc {rtl.pc:#x}: {disasm(eng.word, eng.pc)}\n"
                 f"  rtl:    {self._show(rtl)}\n  engine: {self._show(eng)}")
         self.records.append((now, rtl))
         return rtl
+
+    def _key(self, r: CommitRecord) -> tuple:
+        if self.strict:
+            return (r.pc, r.word, r.swrite, r.vwrite, r.exec_after, tuple(r.mwrites), r.event, r.fault)
+        return r.warp_key()
 
     @staticmethod
     def _show(r: CommitRecord) -> str:
@@ -152,6 +180,9 @@ class Lockstep:
         dut.start.value = 0
         dut.new_launch.value = 0
         dut.if_resp_valid.value = 0
+        dut.rd_valid.value = 0
+        dut.at_valid.value = 0
+        dut.ack_valid.value = 0
         for _ in range(2):
             await RisingEdge(dut.clk)
         dut.rst_n.value = 1
@@ -184,6 +215,17 @@ class Lockstep:
             dut.if_resp_valid.value = int(resp is not None)
             if resp:
                 dut.if_resp_id.value, dut.if_resp_data.value = resp
+            m = self.mem
+            rd, at, ack = m.read_resp.pop(now, None), m.atomic_resp.pop(now, None), m.acks.pop(now, None)
+            dut.rd_valid.value = int(rd is not None)
+            if rd:
+                dut.rd_warp.value, dut.rd_seg.value, dut.rd_data.value = rd
+            dut.at_valid.value = int(at is not None)
+            if at:
+                dut.at_warp.value, dut.at_seg.value, dut.at_old.value = at
+            dut.ack_valid.value = int(ack is not None)
+            if ack is not None:
+                dut.ack_warp.value = ack
             await Timer(1, unit="ns")
             # ---- retire records, in channel order
             valid = int(dut.ret_valid.value)
@@ -191,13 +233,16 @@ class Lockstep:
                 allrec = int(dut.ret.value)
                 for ch in range(NRET):
                     if valid >> ch & 1:
-                        r = decode_retire(allrec >> (ch * RETIRE_WIDTH))
+                        r = RETIRE.decode(allrec >> (ch * RETIRE.width))
                         rec = self._check(now, ch, r, block)
                         if rec.fault:
                             fault = rec.fault
                             end = block_start + r["clock"] + 1     # issue cycle + 1 (11.6)
                 if fault:
                     break
+            req = int(dut.lsu_req.value)
+            if req >> (MREQ.width - 1):                    # LSU first, then I-fetch (11.4)
+                self.mem.lsu_request(now, MREQ.decode(req))
             if int(dut.if_req_valid.value):
                 self.mem.ifetch_request(now, int(dut.if_req_id.value), int(dut.if_req_addr.value))
             await RisingEdge(dut.clk)

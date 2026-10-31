@@ -6,7 +6,9 @@ a + T_mem, an ATOMIC completes at a + 2 * T_mem + 8. Within a cycle, LSU request
 accepted before the I-fetch request.
 """
 
-from collections import defaultdict
+from mgpu.model.execute import atom_op
+
+ATOM_OPS = ["add", "min", "max", "xchg", "and", "or"]
 
 
 class Memory:
@@ -16,6 +18,9 @@ class Memory:
         self.t_mem, self.t_seg = t_mem, t_seg
         self.free = 0
         self.ifetch_resp = {}                  # cycle -> (id, line address)
+        self.read_resp = {}                    # cycle -> (warp, seg, segment data)
+        self.atomic_resp = {}                  # cycle -> (warp, seg, old value per lane)
+        self.acks = {}                         # cycle -> warp
         self.reads = self.writes = self.atomics = 0
 
     # ---- host access
@@ -32,6 +37,41 @@ class Memory:
         a = max(r, self.free)
         self.free = a + slots * self.t_seg
         return a
+
+    def word(self, addr: int) -> int:
+        return int.from_bytes(self.data[addr:addr + 4], "little")
+
+    def lsu_request(self, now: int, r: dict) -> None:
+        """A segment request from the LSU port (fields of mreq_t). Its effect on memory
+        happens at acceptance; requests are accepted in arrival order."""
+        base = r["addr"]
+        if r["kind"] == 0:                                  # READ
+            self.reads += 1
+            done = self.accept(now) + self.t_mem + 8
+            assert done not in self.read_resp
+            self.read_resp[done] = (r["warp"], r["seg"], self.line(base))
+        elif r["kind"] == 1:                                # WRITE
+            self.writes += 1
+            ack = self.accept(now) + self.t_mem
+            for k in range(32):
+                if r["wmask"] >> k & 1:
+                    self.write_words(base + 4 * k, [(r["wdata"] >> (32 * k)) & 0xFFFFFFFF])
+            assert ack not in self.acks
+            self.acks[ack] = r["warp"]
+        else:                                               # ATOMIC, lanes in ascending order
+            self.atomics += 1
+            done = self.accept(now, 2) + 2 * self.t_mem + 8
+            op = ATOM_OPS[r["aop"]]
+            old = 0
+            for lane in range(32):
+                if r["lanes"] >> lane & 1:
+                    a = base + 4 * ((r["off"] >> (5 * lane)) & 31)
+                    x = (r["opnd"] >> (32 * lane)) & 0xFFFFFFFF
+                    o = self.word(a)
+                    old |= o << (32 * lane)
+                    self.write_words(a, [atom_op(op, o, x)])
+            assert done not in self.atomic_resp
+            self.atomic_resp[done] = (r["warp"], r["seg"], old)
 
     def ifetch_request(self, now: int, rid: int, addr: int) -> None:
         self.reads += 1

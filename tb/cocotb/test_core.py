@@ -208,3 +208,109 @@ async def random_alu_programs(dut):
         words = g.b.finish()
         dut._log.info(f"seed {seed}: {len(words)} words, grid {grid} x {block}")
         await lockstep(dut, words, grid=grid, block=block)
+
+
+DATA = 0x8000
+LANE_ADDR = "V_GETSR v1, LANE_ID\nV_SHLI v1, v1, {sh}\nV_ADD {dst}, v1, s1\n"
+
+
+@cocotb.test()
+async def global_memory(dut):
+    words = list(range(100, 100 + 512))
+    await lockstep(dut, f"""
+        S_LI s1, {DATA}
+        {LANE_ADDR.format(sh=2, dst="v2")}
+        V_LW v3, 0(v2)                  ; one segment
+        V_LW v4, 64(v2)                 ; two segments
+        {LANE_ADDR.format(sh=7, dst="v5")}
+        V_LW v6, 4(v5)                  ; 32 segments
+        V_ADDI v7, v3, 1
+        V_SW v7, 0x800(v2)
+        V_SW v6, 0x900(v5)              ; 32 store segments
+        V_SW v1, 0x804(v0)              ; every lane to one word: the highest lane wins
+        S_LW s2, 8(s1)
+        S_SW s2, 0x1000(s1)
+        S_LI s31, 0x00F0F00F
+        V_LW v8, 0x800(v2)
+        V_SW v8, 0x2000(v2)
+        S_LI s31, 0
+        V_LW v9, 0(v2)                  ; EXEC = 0: no request
+        V_SW v9, 0(v2)
+        S_LW s3, 0x1000(s1)             ; scalar accesses ignore EXEC
+        S_LI s31, -1
+        V_LW v10, 0x900(v5)
+        EXIT""", block=32, grid=2, args=[DATA], memory={DATA: words}, check_cycles=True)
+
+
+@cocotb.test()
+async def shared_memory(dut):
+    await lockstep(dut, f"""
+        {LANE_ADDR.format(sh=2, dst="v2")}
+        V_LDS v3, 0(v2)                 ; poison
+        V_STS v1, 0(v2)                 ; conflict-free
+        {LANE_ADDR.format(sh=3, dst="v4")}
+        V_STS v1, 0x200(v4)             ; two-way conflict
+        V_LDS v5, 0x200(v4)
+        {LANE_ADDR.format(sh=7, dst="v6")}
+        V_STS v1, 4(v6)                 ; 32-way conflict
+        V_LDS v7, 4(v6)
+        V_LDS v8, 8(v0)                 ; broadcast
+        V_STS v1, 0x40(v0)              ; collisions: the highest lane wins
+        V_LDS v9, 0x40(v0)
+        S_LI s31, 0x0000FF00
+        V_LDS v10, 0x200(v4)
+        S_LI s31, 0
+        V_LDS v11, 0(v2)
+        V_STS v11, 0(v2)
+        S_LI s31, -1
+        EXIT""", block=32, args=[0], check_cycles=True)
+
+
+@cocotb.test()
+async def atomics(dut):
+    await lockstep(dut, f"""
+        S_LI s1, {DATA}
+        {LANE_ADDR.format(sh=2, dst="v2")}
+        V_ADDI v3, v1, 1
+        V_ATOM.ADD v4, v0, v3           ; every lane on word 0
+        V_ADD v5, v0, s1
+        V_ATOM.ADD v6, v5, v3           ; one word, ascending lanes
+        V_ATOM.MAX v7, v2, v1
+        V_ATOM.XCHG v8, v2, s1
+        {LANE_ADDR.format(sh=7, dst="v9")}
+        V_ATOM.OR v10, v9, v3           ; 32 segments
+        V_ATOM.ADD.S v11, v0, v3        ; shared, one word
+        V_ADDI v17, v1, -64
+        V_ATOM.MIN.S v12, v2, v17       ; signed: negative operands win
+        V_ATOM.MIN v18, v2, v17
+        V_ATOM.AND.S v13, v2, s1
+        S_LI s31, 0
+        V_ATOM.ADD v14, v2, v3          ; EXEC = 0
+        V_ATOM.ADD.S v15, v2, v3
+        S_LI s31, 0x80000001
+        V_ATOM.XCHG v16, v2, v3
+        S_LI s31, -1
+        EXIT""", block=32, args=[DATA], memory={DATA: list(range(64))}, check_cycles=True)
+
+
+@cocotb.test()
+async def memory_faults(dut):
+    base = f"S_LI s1, {DATA}\n{LANE_ADDR.format(sh=2, dst='v2')}V_LW v3, 0(v2)\n"
+    for bad, code in (("V_LW v4, 2(v2)", 2), ("S_LI s9, 0xFFFFF\nS_LW s4, 1(s9)", 3),
+                      ("V_ADDI v5, v1, -5\nV_SHLI v5, v5, 2\nV_STS v1, 0x3FEC(v5)", 3),
+                      ("V_ATOM.ADD v4, v2, v1\nV_GETSR v6, LANE_ID\nV_ATOM.ADD v4, v6, v1", 2)):
+        res = await lockstep(dut, base + bad + "\nEXIT", block=64, args=[DATA], check_cycles=True)
+        assert res.fault and res.fault[0] == code, res.fault
+
+
+@cocotb.test()
+async def random_single_warp_programs(dut):
+    """The fuzzer's diff-mode programs (all instructions, faults, illegal words) on
+    single-warp blocks, where the result cannot depend on the warp schedule."""
+    n = int(os.environ.get("SEEDS", "12"))
+    for seed in range(n):
+        case = fuzz_gen.random_case(1000 + seed, "diff")
+        block = random.Random(seed).choice([1, 17, 32])
+        dut._log.info(f"seed {1000 + seed}: {len(case.words)} words, grid {case.grid} x {block}")
+        await lockstep(dut, case.words, grid=case.grid, block=block, args=case.args,
+                       memory=case.memory, mem_size=case.mem_size)

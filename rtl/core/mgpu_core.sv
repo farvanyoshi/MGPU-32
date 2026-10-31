@@ -45,6 +45,18 @@ module mgpu_core
     input  logic                    if_resp_valid,
     input  logic [4:0]              if_resp_id,
     input  logic [31:0][31:0]       if_resp_data,
+    // LSU memory port (segment requests; READ data, ATOMIC old values and WRITE acks)
+    output mreq_t                   lsu_req,
+    input  logic                    rd_valid,
+    input  logic [4:0]              rd_warp,
+    input  logic [4:0]              rd_seg,
+    input  logic [31:0][31:0]       rd_data,
+    input  logic                    at_valid,
+    input  logic [4:0]              at_warp,
+    input  logic [4:0]              at_seg,
+    input  logic [31:0][31:0]       at_old,
+    input  logic                    ack_valid,
+    input  logic [4:0]              ack_warp,
     // retire port
     output logic [NRET-1:0]         ret_valid,
     output retire_t [NRET-1:0]      ret
@@ -63,6 +75,7 @@ module mgpu_core
   // ------------------------------------------------------------------ warp table
   logic [W-1:0]       live, exited, in_flight, fetch_pend;
   logic [W-1:0][31:0] pc;
+  logic [W-1:0][5:0]  stores_out;      // global store segments not yet acknowledged
 
   // ------------------------------------------------------------------ fetch
   logic [W-1:0]       f_req, f_grant, consume, ibuf_valid, ibuf_ff;
@@ -163,6 +176,15 @@ module mgpu_core
     end
   end
 
+  lsu_info_t   li0;
+  logic        af;               // LSU address fault
+  logic [7:0]  af_code;
+  logic [4:0]  af_lane;
+  logic [31:0] af_info;
+  mgpu_agen u_agen (.ctrl(c0), .exec(s_rdata[4]), .sa(s_rdata[0]), .sd(s_rdata[3]),
+                    .va(v_rdata[0]), .vb(p0.vb), .vd(v_rdata[3]), .mem_last,
+                    .info(li0), .fault(af), .fcode(af_code), .flane(af_lane), .finfo(af_info));
+
   ipkt_t       p0;
   logic        f0;               // faults at issue
   logic [7:0]  f0_code;
@@ -199,10 +221,10 @@ module mgpu_core
       p0.vb = '0;
     end
     u0 = wunit[g];
-    f0 = ibuf_ff[g] || c0.illegal;
-    f0_code = ibuf_ff[g] ? E_RANGE : E_ILLEGAL;
-    f0_lane = '0;
-    f0_info = ibuf_ff[g] ? pc[g] : ibuf_word[g];
+    f0 = ibuf_ff[g] || c0.illegal || (u0 == 3'(U_LSU) && af);
+    f0_code = ibuf_ff[g] ? E_RANGE : c0.illegal ? E_ILLEGAL : af_code;
+    f0_lane = (ibuf_ff[g] || c0.illegal) ? 5'd0 : af_lane;
+    f0_info = ibuf_ff[g] ? pc[g] : c0.illegal ? ibuf_word[g] : af_info;
   end
 
   // occupancy of the issued instruction (core.md 7)
@@ -212,6 +234,8 @@ module mgpu_core
       3'(U_VALU): occ0 = (c0.op == OP_V_SHFL || c0.op == OP_V_READLANE) ? 8'(2 * P) : 8'(P);
       3'(U_FPU):  occ0 = 8'(P);
       3'(U_SFU):  occ0 = 8'(32 / S);
+      3'(U_LSU):  occ0 = 8'(P) + (!c0.mem_shared ? 8'(li0.n_seg)
+                                 : !is_load(c0.op) && !is_store(c0.op) ? 8'(li0.n_act) : 8'(li0.d));
       default:    occ0 = 8'd1;
     endcase
   end
@@ -219,6 +243,7 @@ module mgpu_core
   // ------------------------------------------------------------------ packet pipeline
   typedef struct packed {
     ipkt_t       p;
+    lsu_info_t   li;
     logic [2:0]  unit;
     logic        fault;
     logic [7:0]  fcode;
@@ -231,7 +256,7 @@ module mgpu_core
       st1 <= '0;
       st2 <= '0;
     end else begin
-      st1 <= '{p: p0, unit: u0, fault: f0, fcode: f0_code, flane: f0_lane, finfo: f0_info};
+      st1 <= '{p: p0, li: li0, unit: u0, fault: f0, fcode: f0_code, flane: f0_lane, finfo: f0_info};
       st2 <= st1;
     end
   end
@@ -246,11 +271,15 @@ module mgpu_core
   /* verilator lint_on UNUSEDSIGNAL */
 
   // ------------------------------------------------------------------ execution units
-  retire_t r_salu, r_valu, r_fpu, r_sfu;
+  retire_t r_salu, r_valu, r_fpu, r_sfu, r_lsu_s, r_lsu_a, r_lsu_b, r_lsu_c;
   mgpu_salu u_salu (.clk, .rst_n, .in(to_unit(st2, U_SALU)), .out(r_salu), .br_valid, .br_pc);
   mgpu_vexec #(.KIND(0), .LANES(L), .LAT(2)) u_valu (.clk, .rst_n, .in(to_unit(st2, U_VALU)), .out(r_valu));
   mgpu_vexec #(.KIND(1), .LANES(L), .LAT(4)) u_fpu (.clk, .rst_n, .in(to_unit(st2, U_FPU)), .out(r_fpu));
   mgpu_vexec #(.KIND(2), .LANES(S), .LAT(8)) u_sfu (.clk, .rst_n, .in(to_unit(st2, U_SFU)), .out(r_sfu));
+  mgpu_lsu #(.W(W), .P(P)) u_lsu (
+      .clk, .rst_n, .clr(accept), .in(to_unit(st2, U_LSU)), .in_info(st2.li), .req(lsu_req),
+      .rd_valid, .rd_warp, .rd_seg, .rd_data, .at_valid, .at_warp, .at_seg, .at_old,
+      .rec_s(r_lsu_s), .rec_a(r_lsu_a), .rec_b(r_lsu_b), .rec_c(r_lsu_c));
 
   // ------------------------------------------------------------------ faults
   retire_t    fq;                 // the fault waiting for in-flight instructions to drain
@@ -280,6 +309,10 @@ module mgpu_core
     ret[R_VALU] = r_valu;
     ret[R_FPU] = r_fpu;
     ret[R_SFU] = r_sfu;
+    ret[R_LSU_S] = r_lsu_s;
+    ret[R_LSU_A] = r_lsu_a;
+    ret[R_LSU_B] = r_lsu_b;
+    ret[R_LSU_C] = r_lsu_c;
     if (fq_emit) ret[R_FAULT] = fq;
     for (int i = 0; i < NRET; i++) ret_valid[i] = ret[i].valid;
   end
@@ -289,10 +322,10 @@ module mgpu_core
   logic [2:0][WB-1:0]    s_wwarp;
   logic [2:0][4:0]       s_waddr;
   logic [2:0][31:0]      s_wdata;
-  logic [4:0]            v_we;
-  logic [4:0][WB-1:0]    v_wwarp;
-  logic [4:0][4:0]       v_waddr;
-  logic [4:0][31:0][31:0] v_wdata;
+  logic [5:0]            v_we;
+  logic [5:0][WB-1:0]    v_wwarp;
+  logic [5:0][4:0]       v_waddr;
+  logic [5:0][31:0][31:0] v_wdata;
   always_comb begin
     s_we = '0;
     s_wwarp = '0;
@@ -311,7 +344,11 @@ module mgpu_core
     s_wwarp[1] = WB'(r_valu.warp);
     s_waddr[1] = r_valu.sw_reg;
     s_wdata[1] = r_valu.sw_val;
-    // vector ports: VALU, FPU, SFU, LSU issue path, LSU response path
+    s_we[2] = r_lsu_b.valid && r_lsu_b.sw_valid;
+    s_wwarp[2] = WB'(r_lsu_b.warp);
+    s_waddr[2] = r_lsu_b.sw_reg;
+    s_wdata[2] = r_lsu_b.sw_val;
+    // vector ports: VALU, FPU, SFU, LSU (shared, loads, atomics)
     v_we[0] = r_valu.valid && r_valu.vw_valid;
     v_wwarp[0] = WB'(r_valu.warp);
     v_waddr[0] = r_valu.vw_reg;
@@ -324,6 +361,18 @@ module mgpu_core
     v_wwarp[2] = WB'(r_sfu.warp);
     v_waddr[2] = r_sfu.vw_reg;
     v_wdata[2] = r_sfu.vw_val;
+    v_we[3] = r_lsu_a.valid && r_lsu_a.vw_valid;
+    v_wwarp[3] = WB'(r_lsu_a.warp);
+    v_waddr[3] = r_lsu_a.vw_reg;
+    v_wdata[3] = r_lsu_a.vw_val;
+    v_we[4] = r_lsu_b.valid && r_lsu_b.vw_valid;
+    v_wwarp[4] = WB'(r_lsu_b.warp);
+    v_waddr[4] = r_lsu_b.vw_reg;
+    v_wdata[4] = r_lsu_b.vw_val;
+    v_we[5] = r_lsu_c.valid && r_lsu_c.vw_valid;
+    v_wwarp[5] = WB'(r_lsu_c.warp);
+    v_waddr[5] = r_lsu_c.vw_reg;
+    v_wdata[5] = r_lsu_c.vw_val;
   end
 
   logic [W-1:0][31:0] init_exec;
@@ -339,14 +388,19 @@ module mgpu_core
       .clk, .rwarp(s_rwarp), .raddr(s_raddr), .rdata(s_rdata),
       .we(s_we), .wwarp(s_wwarp), .waddr(s_waddr), .wdata(s_wdata),
       .init(accept), .init_args(args), .init_exec);
-  mgpu_vrf #(.W(W), .NR(4), .NW(5)) u_vrf (
+  mgpu_vrf #(.W(W), .NR(4), .NW(6)) u_vrf (
       .clk, .rwarp(v_rwarp), .raddr(v_raddr), .rdata(v_rdata),
       .we(v_we), .wwarp(v_wwarp), .waddr(v_waddr), .wdata(v_wdata), .init(accept));
 
   // ------------------------------------------------------------------ control state
   logic all_exited;
   assign all_exited = &(exited | ~live);
-  assign block_done = active && all_exited;
+  logic no_stores;
+  always_comb begin
+    no_stores = 1'b1;
+    for (int w = 0; w < W; w++) if (stores_out[w] != 6'd0) no_stores = 1'b0;
+  end
+  assign block_done = active && all_exited && no_stores;
   assign idle = !active;
 
   always_comb begin
@@ -362,6 +416,7 @@ module mgpu_core
       exited <= '0;
       in_flight <= '0;
       fetch_pend <= '0;
+      stores_out <= '0;
       rem <= '0;
       rr <= '0;
       boot <= '0;
@@ -401,6 +456,12 @@ module mgpu_core
           in_flight[WB'(ret[i].warp)] <= 1'b0;
           if (ret[i].event_ == EV_EXIT) exited[WB'(ret[i].warp)] <= 1'b1;
         end
+      end
+      // outstanding global stores
+      for (int w = 0; w < W; w++) begin
+        stores_out[w] <= stores_out[w]
+            + 6'(lsu_req.valid && lsu_req.kind == MK_WRITE && lsu_req.warp == 5'(w))
+            - 6'(ack_valid && ack_warp == 5'(w));
       end
       if (fq_emit) begin
         active <= 1'b0;
