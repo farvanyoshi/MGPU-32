@@ -53,13 +53,16 @@ module mgpu_fetch
   logic [LINES-1:0]            valid, pend;
   logic [LINES-1:0][24:0]      tag;
   logic [LINES-1:0][4:0]       pend_id;
-  logic [LINES-1:0][31:0][31:0] data;
+  // line data: a RAM read in the lookup cycle, its word used in the decode cycle
+  logic [31:0][31:0]            line_out;
+  logic [4:0]                   hit_off;
   logic [W-1:0][24:0]          fill_line;   // line of the fill started by each warp
 
   // ---- per-warp state
   logic [W-1:0]       wait_v, d_valid, d_ff;
   logic [W-1:0][4:0]  wait_id, wait_off;
-  logic [W-1:0][31:0] d_word;
+  logic [W-1:0][31:0] d_word, d_eff;
+  logic [W-1:0]       d_ram;               // the decode-stage word comes from the line RAM
   logic [W-1:0]       busy;
   assign busy = ibuf_valid | d_valid | wait_v;
   assign fills_pending = |wait_v;
@@ -132,7 +135,6 @@ module mgpu_fetch
       if (r_install) begin
         valid[r_idx] <= 1'b1;
         pend[r_idx] <= 1'b0;
-        data[r_idx] <= mresp_data;
       end
       // deliver the response to every waiting warp
       for (int w = 0; w < W; w++) begin
@@ -141,6 +143,7 @@ module mgpu_fetch
           d_valid[w] <= 1'b1;
           d_ff[w] <= 1'b0;
           d_word[w] <= mresp_data[wait_off[w]];
+          d_ram[w] <= 1'b0;
         end
       end
       // lookup
@@ -149,7 +152,9 @@ module mgpu_fetch
       if (l_ff || l_hit || l_bypass) begin
         d_valid[g_idx] <= 1'b1;
         d_ff[g_idx] <= l_ff;
-        d_word[g_idx] <= l_ff ? 32'd0 : l_hit ? data[l_idx][l_off] : mresp_data[l_off];
+        d_word[g_idx] <= l_ff ? 32'd0 : mresp_data[l_off];
+        d_ram[g_idx] <= l_hit;
+        hit_off <= l_off;
       end
       if (l_wait) begin
         wait_v[g_idx] <= 1'b1;
@@ -173,7 +178,7 @@ module mgpu_fetch
         if (d_valid[w]) begin
           d_valid[w] <= 1'b0;
           ibuf_valid[w] <= 1'b1;
-          ibuf_word[w] <= d_word[w];
+          ibuf_word[w] <= d_eff[w];
           ibuf_ff[w] <= d_ff[w];
           ibuf_ctrl[w] <= d_ctrl[w];
         end else if (consume[w]) begin
@@ -183,8 +188,13 @@ module mgpu_fetch
     end
   end
 
+  mgpu_ram #(.DEPTH(LINES), .LANES(32)) u_lines (
+      .clk, .we({32{r_install}}), .waddr(r_idx), .wdata(mresp_data),
+      .re(l_hit), .raddr(l_idx), .rdata(line_out));
+
   ctrl_t [W-1:0] d_ctrl;
   for (genvar w = 0; w < W; w++) begin : g_dec
-    mgpu_decode u_dec (.word(d_word[w]), .ctrl(d_ctrl[w]));
+    assign d_eff[w] = d_ram[w] ? line_out[hit_off] : d_word[w];
+    mgpu_decode u_dec (.word(d_eff[w]), .ctrl(d_ctrl[w]));
   end
 endmodule

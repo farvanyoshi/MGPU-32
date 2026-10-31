@@ -158,35 +158,90 @@ module mgpu_lsu
   end
 
   // ---------------------------------------------------------------- shared memory
-  logic [4095:0][31:0] sh;
+  // 32 banks of 128 words (word address a: bank a[4:0], row a[11:5]), each a RAM with one
+  // read and one write per cycle and a registered read. The reads of round j (or atomic step
+  // j) are issued in cycle i = P - 1 + j and used in i = P + j; writes happen in i = P + j.
+  // A word never written since block start reads as the poison value.
   logic [31:0][31:0]   sacc, snew;
-  logic                s_round, s_last, a_step, a_last;
-  logic [4:0]          j_round;
-  logic [31:0]         lr;            // lanes of this round
-  logic [31:0][31:0]   rdl;           // their read data
-  int                  a_lane;        // shared atomic: lane of this step
+  logic                s_round, s_last, a_step, a_last, s_rd, a_rd;
+  logic [4:0]          j_round, j_rd;
+  logic [31:0]         lr, lrd;       // lanes of this round / of the round being read
+  logic [31:0][31:0]   rdl;           // read data of each lane (this round)
+  int                  a_lane, a_lane_rd;
   logic [31:0]         a_old, a_new;
+  logic [31:0]         b_re, b_vq;
+  logic [31:0][6:0]    b_raddr, b_waddr;
+  logic [31:0]         b_we;
+  logic [31:0][31:0]   b_wdata, b_out;
+  logic [4095:0]       sv;            // word written since block start
+  logic                a_prev;        // the previous cycle was an atomic step: forward its result
+  logic [11:0]         a_prev_word;
+  logic [31:0]         a_prev_new;
   assign s_round = xv && xs && !xa && xc >= 8'(P) && xc < 8'(P) + 8'(xi.d);
   assign s_last  = s_round && xc == 8'(P) + 8'(xi.d) - 8'd1;
   assign j_round = 5'(xc - 8'(P));
   assign a_step  = xv && xs && xa && xc >= 8'(P) && xc < 8'(P) + 8'(xi.n_act);
   assign a_last  = a_step && xc == 8'(P) + 8'(xi.n_act) - 8'd1;
+  assign j_rd    = 5'(xc - 8'(P - 1));
+  assign s_rd    = xv && xs && !xa && xc >= 8'(P - 1) && xc < 8'(P - 1) + 8'(xi.d);
+  assign a_rd    = xv && xs && xa && xc >= 8'(P - 1) && xc < 8'(P - 1) + 8'(xi.n_act);
   always_comb begin
     int n;
-    for (int l = 0; l < 32; l++) begin
-      lr[l] = xi.lanes[l] && xi.round[l] == j_round;
-      rdl[l] = sh[xi.addr[l][13:2]];
-    end
     a_lane = 0;
+    a_lane_rd = 0;
     n = 0;
     for (int l = 0; l < 32; l++) begin
       if (xi.lanes[l]) begin
         if (8'(n) == xc - 8'(P)) a_lane = l;
+        if (8'(n) == xc - 8'(P - 1)) a_lane_rd = l;
         n++;
       end
     end
-    a_old = sh[xi.addr[a_lane][13:2]];
+    // bank reads
+    b_re = '0;
+    b_raddr = '0;
+    for (int l = 0; l < 32; l++) begin
+      lrd[l] = xi.lanes[l] && xi.round[l] == j_rd;
+      if (s_rd && lrd[l]) begin
+        b_re[xi.addr[l][6:2]] = 1'b1;
+        b_raddr[xi.addr[l][6:2]] = xi.addr[l][13:7];
+      end
+    end
+    if (a_rd) begin
+      b_re[xi.addr[a_lane_rd][6:2]] = 1'b1;
+      b_raddr[xi.addr[a_lane_rd][6:2]] = xi.addr[a_lane_rd][13:7];
+    end
+    // this round's data
+    for (int l = 0; l < 32; l++) begin
+      lr[l] = xi.lanes[l] && xi.round[l] == j_round;
+      rdl[l] = b_vq[xi.addr[l][6:2]] ? b_out[xi.addr[l][6:2]] : POISON;
+    end
+    a_old = b_vq[xi.addr[a_lane][6:2]] ? b_out[xi.addr[a_lane][6:2]] : POISON;
+    if (a_prev && a_prev_word == xi.addr[a_lane][13:2]) a_old = a_prev_new;
     a_new = atom_apply(atom_kind(x.ctrl.op), a_old, xi.data[a_lane]);
+    // bank writes: a store's round (ascending lanes: the highest lane wins), an atomic step
+    b_we = '0;
+    b_waddr = '0;
+    b_wdata = '0;
+    if (s_round && xst) begin
+      for (int l = 0; l < 32; l++) begin
+        if (lr[l]) begin
+          b_we[xi.addr[l][6:2]] = 1'b1;
+          b_waddr[xi.addr[l][6:2]] = xi.addr[l][13:7];
+          b_wdata[xi.addr[l][6:2]] = xi.data[l];
+        end
+      end
+    end
+    if (a_step) begin
+      b_we[xi.addr[a_lane][6:2]] = 1'b1;
+      b_waddr[xi.addr[a_lane][6:2]] = xi.addr[a_lane][13:7];
+      b_wdata[xi.addr[a_lane][6:2]] = a_new;
+    end
+  end
+  for (genvar b = 0; b < 32; b++) begin : g_bank
+    mgpu_ram #(.DEPTH(128), .LANES(1)) u_ram (
+        .clk, .we(b_we[b]), .waddr(b_waddr[b]), .wdata(b_wdata[b]),
+        .re(b_re[b]), .raddr(b_raddr[b]), .rdata(b_out[b]));
   end
 
   // ---------------------------------------------------------------- post-occupancy records (LSU_A)
@@ -292,7 +347,7 @@ module mgpu_lsu
       pw_cnt <= '0;
       done_b <= '0;
       done_c <= '0;
-      if (clr) for (int a = 0; a < 4096; a++) sh[a] <= POISON;
+      if (clr) sv <= '0;
     end else begin
       // sequencing
       if (in.valid) begin
@@ -309,17 +364,16 @@ module mgpu_lsu
         bd <= vd;
       end
       if (ana) ci <= ai;
-      // shared rounds (ascending lanes: the highest lane wins a store)
-      if (s_round) begin
-        for (int l = 0; l < 32; l++) begin
-          if (lr[l]) begin
-            if (xl) sacc[l] <= rdl[l];
-            else sh[xi.addr[l][13:2]] <= xi.data[l];
-          end
-        end
+      // shared memory: valid bits of the words read and written, the lanes' results
+      for (int b = 0; b < 32; b++) begin
+        if (b_re[b]) b_vq[b] <= sv[{b_raddr[b], 5'(b)}];
+        if (b_we[b]) sv[{b_waddr[b], 5'(b)}] <= 1'b1;
       end
+      if (s_round && xl) for (int l = 0; l < 32; l++) if (lr[l]) sacc[l] <= rdl[l];
+      a_prev <= a_step;
       if (a_step) begin
-        sh[xi.addr[a_lane][13:2]] <= a_new;
+        a_prev_word <= xi.addr[a_lane][13:2];
+        a_prev_new <= a_new;
         sacc[a_lane] <= a_old;
         snew[a_lane] <= a_new;
       end
