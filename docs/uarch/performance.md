@@ -81,7 +81,7 @@ From Python, use `Device(timing={"warps": 8, "lanes": 8, "mem_latency": 100})`; 
 | `warp_reduce` | 39,885 | 0.26 | 92% | 69 / 0 / 0 / 6 | unit 34%, mem 29%, ifetch 6%, inflight 5% |
 | `collatz` | 1,232,595 | 0.34 | 45% | 95 / 0 / 0 / 0 | unit 49%, ifetch 15% |
 | `histogram` | 16,509 | 0.23 | 100% | 44 / 0 / 0 / 64 | unit 32%, mem 26%, ifetch 10%, inflight 6% |
-| `sigmoid` | 20,269 | 0.28 | 100% | 42 / 18 / 48 / 15 | unit 29%, mem 18%, inflight 13%, ifetch 7% |
+| `sigmoid` | 20,269 | 0.28 | 100% | 42 / 18 / 48 / 15 | unit 30%, mem 18%, inflight 13%, ifetch 6% |
 | `matmul` | 150,949 | 0.52 | 100% | 72 / 22 / 0 / 63 | unit 30%, mem 12% |
 | `conv3x3` | 162,965 | 0.05 | 100% | 6 / 3 / 0 / 8 | mem 89% |
 
