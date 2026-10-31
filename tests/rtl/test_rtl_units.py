@@ -19,3 +19,9 @@ def test_decode():
 
 def test_sfu_rom():
     run_cocotb("mgpu_sfu_rom", sources("units/mgpu_sfu_rom.sv"), "test_sfu_rom")
+
+
+@pytest.mark.parametrize("lanes", [8, 1])
+def test_valu(lanes):
+    run_cocotb("mgpu_valu", sources("common/mgpu_pipe.sv", "units/mgpu_int_lane.sv", "units/mgpu_valu.sv"),
+               "test_valu", parameters={"L": lanes}, extra_env={"L": str(lanes), "LAT": "2"})
