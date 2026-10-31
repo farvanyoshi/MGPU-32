@@ -22,6 +22,7 @@ def test_core_fuzz():
     import os
     env = {"W": "8", "L": "8", "S": "2",
            "MGPU_RTL_FUZZ_SEEDS": os.environ.get("MGPU_RTL_FUZZ_SEEDS", "16"),
-           "FUZZ_START": os.environ.get("FUZZ_START", "0")}
+           "FUZZ_START": os.environ.get("FUZZ_START", "0"),
+           "FUZZ_MODES": os.environ.get("FUZZ_MODES", "diff,raw,eq")}
     run_cocotb("mgpu_core", core_sources(), "test_core_fuzz", parameters={"W": 8, "L": 8, "S": 2},
                extra_env=env)

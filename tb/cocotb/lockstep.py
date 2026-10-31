@@ -6,6 +6,7 @@ steps the same warp and compares the records under rule E4 (CommitRecord.warp_ke
 end it checks that both finished the same way and compares global memory (E1-E3).
 """
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -142,6 +143,10 @@ class Lockstep:
         if not self.gpu.begin():
             raise ValueError("launch rejected by the engine")
         self.records: list[tuple[int, CommitRecord]] = []
+        # MGPU_LOCKSTEP_DUMP=<file>: append "issue_cycle block warp pc" per retired instruction
+        path = os.environ.get("MGPU_LOCKSTEP_DUMP")
+        self.dump = open(path, "a") if path else None
+        self.block_start = 0
 
     def _load(self, addr, words):
         self.mem.write_words(addr, words)
@@ -177,6 +182,8 @@ class Lockstep:
                 f"pc {rtl.pc:#x}: {disasm(eng.word, eng.pc)}\n"
                 f"  rtl:    {self._show(rtl)}\n  engine: {self._show(eng)}")
         self.records.append((now, rtl))
+        if self.dump:
+            self.dump.write(f"{self.block_start + r['clock']} {block} {rtl.warp} {rtl.pc:#x}\n")
         return rtl
 
     def _key(self, r: CommitRecord) -> tuple:
@@ -240,6 +247,7 @@ class Lockstep:
             dut.start.value = int(bool(start))
             if start:
                 block, block_start = next_block, now
+                self.block_start = now
                 dut.new_launch.value = int(next_block == 0)
                 dut.block_id.value = next_block
                 next_block += 1
@@ -277,6 +285,8 @@ class Lockstep:
                 self.mem.lsu_request(now, MREQ.decode(req))
             if int(dut.if_req_valid.value):
                 self.mem.ifetch_request(now, int(dut.if_req_id.value), int(dut.if_req_addr.value))
+                if self.dump:
+                    self.dump.write(f"F {now} {int(dut.if_req_addr.value):#x} {int(dut.if_req_id.value)}\n")
             await RisingEdge(dut.clk)
         else:
             raise LockstepError(f"no completion after {max_cycles} cycles")

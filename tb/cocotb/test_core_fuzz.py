@@ -7,7 +7,8 @@
 - eq:   well-defined multi-warp programs (shared memory, barriers, atomics), compared
         under rule E4 plus final memory and STATUS.
 
-MGPU_RTL_FUZZ_SEEDS sets the number of programs per mode; FUZZ_START the first seed.
+MGPU_RTL_FUZZ_SEEDS sets the number of programs per mode, FUZZ_START the first seed and
+FUZZ_MODES (comma-separated) the modes to run.
 """
 
 import os
@@ -23,6 +24,7 @@ from lockstep import Launch, Lockstep, model_cycles
 W = int(os.environ.get("W", "8"))
 SEEDS = int(os.environ.get("MGPU_RTL_FUZZ_SEEDS", "16"))
 START = int(os.environ.get("FUZZ_START", "0"))
+MODES = os.environ.get("FUZZ_MODES", "diff,raw,eq").split(",")
 
 
 def terminates(case, block, max_steps) -> bool:
@@ -42,6 +44,8 @@ def terminates(case, block, max_steps) -> bool:
 
 
 async def run_mode(dut, mode):
+    if mode not in MODES:
+        return
     ran = skipped = faults = 0
     for seed in range(START, START + SEEDS):
         if mode == "raw":

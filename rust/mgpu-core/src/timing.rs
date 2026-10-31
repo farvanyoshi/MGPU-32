@@ -154,6 +154,10 @@ struct WarpT {
     ibuf_at: Option<u64>,
     /// Fetch to request at or after this cycle (None: nothing to fetch).
     fetch_req: Option<u64>,
+    /// PC of the next fetch, as the core knows it: PC + 4 after a sequential instruction,
+    /// the target after a branch. (While a warp waits at a barrier the engine still holds
+    /// the BAR's PC, so the engine's PC is not the fetch address.)
+    fetch_pc: u32,
     wait_bar: bool,
     /// Arrival cycle at the barrier (valid while wait_bar).
     bar_arrival: u64,
@@ -364,6 +368,7 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
                         ready_at: now + 1 + w as u64,
                         ibuf_at: None,
                         fetch_req: Some(now + 1 + w as u64),
+                        fetch_pc: entry,
                         wait_bar: false,
                         bar_arrival: 0,
                         last_store_ack: 0,
@@ -399,8 +404,7 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
                     next_event = next_event.min(f);
                     continue;
                 }
-                // blocks are created on their first step; until then a warp is at ENTRY
-                let pc = gpu.warp(bid, w.wid).map_or(entry, |x| x.pc);
+                let pc = w.fetch_pc;
                 let ready = if pc as u64 + 4 > mem_size {
                     now + 2
                 } else {
@@ -467,6 +471,7 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
                 gpu.clock_override = Some(t - core.start);
                 let rec = gpu.step(bid, wid)?;
                 let acc = gpu.last_access;
+                let engine_pc = gpu.warp(bid, wid).map_or(pc, |x| x.pc);
                 issued = true;
                 core.rr_issue = (i + 1) % nw;
                 rep.issued += 1;
@@ -553,6 +558,11 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
                     5
                 };
                 w.ibuf_at = None;
+                w.fetch_pc = if is_branch(op) {
+                    engine_pc
+                } else {
+                    pc.wrapping_add(4)
+                };
                 w.fetch_req = if rec.event == EV_EXIT {
                     None
                 } else if is_branch(op) {
