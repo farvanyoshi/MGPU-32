@@ -13,7 +13,8 @@ module mgpu_salu
     input  ipkt_t       in,
     output retire_t     out,
     output logic        br_valid,   // branch completing with `out` (same warp)
-    output logic [31:0] br_pc       // its next PC
+    output logic [31:0] br_pc,      // its next PC
+    output logic        fence       // a FENCE completing with `out`
 );
   logic [31:0] res, target;
   logic        taken;
@@ -47,7 +48,9 @@ module mgpu_salu
     if (!rst_n) begin
       out.valid <= 1'b0;
       br_valid <= 1'b0;
+      fence <= 1'b0;
     end else begin
+      fence <= in.valid && in.ctrl.op == OP_FENCE;
       out <= in.valid ? r : '0;
       br_valid <= in.valid && in.ctrl.branch;
       br_pc <= taken ? target : in.pc + 32'd4;

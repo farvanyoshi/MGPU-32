@@ -28,6 +28,7 @@ module mgpu_core
     input  logic                    rst_n,
     // dispatch (interfaces.md 3)
     input  logic                    start,        // accepted when idle or block_done
+    input  logic                    kill,         // abort the block at once (another core faulted)
     input  logic                    new_launch,   // with start: invalidate the I-cache
     input  logic [31:0]             entry,
     input  logic [31:0]             block_id,
@@ -70,12 +71,30 @@ module mgpu_core
   logic [31:0]       r_block_id, r_block_dim, r_grid_dim;
   logic [5:0]        r_num_warps;
   logic              accept;
-  assign accept = start && (!active || block_done);
+  assign accept = start && !kill && (!active || block_done);
 
   // ------------------------------------------------------------------ warp table
   logic [W-1:0]       live, exited, in_flight, fetch_pend;
   logic [W-1:0][31:0] pc;
   logic [W-1:0][5:0]  stores_out;      // global store segments not yet acknowledged
+  logic [W-1:0]       wait_bar;        // BAR completed, waiting for release
+  logic [W-1:0]       wait_fence;      // FENCE completed, waiting for its stores
+
+  // ------------------------------------------------------------------ barrier (core.md 9)
+  // A warp arrives once its BAR has completed and its stores are acknowledged. The barrier
+  // releases in the cycle in which every live, non-exited warp has arrived (the last BAR
+  // or an EXIT completed it); released warps may issue in that same cycle. The barrier PC
+  // is recorded when the first BAR issues, and a BAR at another PC faults at issue.
+  logic        bar_active;
+  logic [31:0] bar_pc;
+  logic        release_now;
+  always_comb begin
+    logic all_arrived;
+    all_arrived = 1'b1;
+    for (int w = 0; w < W; w++)
+      if (live[w] && !exited[w] && !(wait_bar[w] && stores_out[w] == 6'd0)) all_arrived = 1'b0;
+    release_now = bar_active && |wait_bar && all_arrived;
+  end
 
   // ------------------------------------------------------------------ fetch
   logic [W-1:0]       f_req, f_grant, consume, ibuf_valid, ibuf_ff;
@@ -125,7 +144,8 @@ module mgpu_core
   always_comb begin
     for (int w = 0; w < W; w++) begin
       wunit[w] = unit_slot(ibuf_ctrl[w].unit, ibuf_ff[w] || ibuf_ctrl[w].illegal);
-      ready[w] = active && !halt && live[w] && !exited[w] && !in_flight[w] && ibuf_valid[w];
+      ready[w] = active && !halt && live[w] && !exited[w] && !in_flight[w] && ibuf_valid[w]
+                 && !(wait_bar[w] && !release_now) && !(wait_fence[w] && stores_out[w] != 6'd0);
       issuable[w] = ready[w] && rem[wunit[w]] <= 8'd2;
     end
     g_any = 1'b0;
@@ -186,6 +206,7 @@ module mgpu_core
                     .info(li0), .fault(af), .fcode(af_code), .flane(af_lane), .finfo(af_info));
 
   ipkt_t       p0;
+  logic        bf;               // barrier PC mismatch ([BAR-2])
   logic        f0;               // faults at issue
   logic [7:0]  f0_code;
   logic [4:0]  f0_lane;
@@ -221,10 +242,12 @@ module mgpu_core
       p0.vb = '0;
     end
     u0 = wunit[g];
-    f0 = ibuf_ff[g] || c0.illegal || (u0 == 3'(U_LSU) && af);
-    f0_code = ibuf_ff[g] ? E_RANGE : c0.illegal ? E_ILLEGAL : af_code;
-    f0_lane = (ibuf_ff[g] || c0.illegal) ? 5'd0 : af_lane;
-    f0_info = ibuf_ff[g] ? pc[g] : c0.illegal ? ibuf_word[g] : af_info;
+    bf = !ibuf_ff[g] && !c0.illegal && c0.op == OP_BAR && bar_active && !release_now
+         && pc[g] != bar_pc;
+    f0 = ibuf_ff[g] || c0.illegal || (u0 == 3'(U_LSU) && af) || bf;
+    f0_code = ibuf_ff[g] ? E_RANGE : c0.illegal ? E_ILLEGAL : bf ? E_BARRIER : af_code;
+    f0_lane = (ibuf_ff[g] || c0.illegal || bf) ? 5'd0 : af_lane;
+    f0_info = ibuf_ff[g] ? pc[g] : c0.illegal ? ibuf_word[g] : bf ? bar_pc : af_info;
   end
 
   // occupancy of the issued instruction (core.md 7)
@@ -272,7 +295,9 @@ module mgpu_core
 
   // ------------------------------------------------------------------ execution units
   retire_t r_salu, r_valu, r_fpu, r_sfu, r_lsu_s, r_lsu_a, r_lsu_b, r_lsu_c;
-  mgpu_salu u_salu (.clk, .rst_n, .in(to_unit(st2, U_SALU)), .out(r_salu), .br_valid, .br_pc);
+  logic    salu_fence;
+  mgpu_salu u_salu (.clk, .rst_n, .in(to_unit(st2, U_SALU)), .out(r_salu), .br_valid, .br_pc,
+                    .fence(salu_fence));
   mgpu_vexec #(.KIND(0), .LANES(L), .LAT(2)) u_valu (.clk, .rst_n, .in(to_unit(st2, U_VALU)), .out(r_valu));
   mgpu_vexec #(.KIND(1), .LANES(L), .LAT(4)) u_fpu (.clk, .rst_n, .in(to_unit(st2, U_FPU)), .out(r_fpu));
   mgpu_vexec #(.KIND(2), .LANES(S), .LAT(8)) u_sfu (.clk, .rst_n, .in(to_unit(st2, U_SFU)), .out(r_sfu));
@@ -409,10 +434,13 @@ module mgpu_core
   end
 
   always_ff @(posedge clk) begin
-    if (!rst_n) begin
+    if (!rst_n || kill) begin
       active <= 1'b0;
       halt <= 1'b0;
       live <= '0;
+      wait_bar <= '0;
+      wait_fence <= '0;
+      bar_active <= 1'b0;
       exited <= '0;
       in_flight <= '0;
       fetch_pend <= '0;
@@ -436,6 +464,9 @@ module mgpu_core
       exited <= '0;
       in_flight <= '0;
       fetch_pend <= '1;
+      wait_bar <= '0;
+      wait_fence <= '0;
+      bar_active <= 1'b0;
       rem <= '0;
     end else begin
       bclk <= bclk + 32'd1;
@@ -455,7 +486,14 @@ module mgpu_core
         if (ret[i].valid && i != R_FAULT) begin
           in_flight[WB'(ret[i].warp)] <= 1'b0;
           if (ret[i].event_ == EV_EXIT) exited[WB'(ret[i].warp)] <= 1'b1;
+          if (ret[i].event_ == EV_BAR) wait_bar[WB'(ret[i].warp)] <= 1'b1;
         end
+      end
+      for (int w = 0; w < W; w++) if (wait_fence[w] && stores_out[w] == 6'd0) wait_fence[w] <= 1'b0;
+      if (salu_fence) wait_fence[WB'(r_salu.warp)] <= 1'b1;
+      if (release_now) begin
+        wait_bar <= '0;
+        bar_active <= 1'b0;
       end
       // outstanding global stores
       for (int w = 0; w < W; w++) begin
@@ -473,6 +511,10 @@ module mgpu_core
         rr <= WB'((g + 1) % W);
         in_flight[g] <= 1'b1;
         rem[u0] <= occ0 + 8'd1;
+        if (!f0 && c0.op == OP_BAR) begin
+          bar_active <= 1'b1;
+          bar_pc <= pc[g];
+        end
         if (f0) begin
           halt <= 1'b1;
         end else if (!c0.branch && c0.op != OP_EXIT) begin

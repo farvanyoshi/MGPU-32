@@ -115,7 +115,8 @@ class Lockstep:
         self.strict = launch.block <= 32
         self.mem = Memory(launch.mem_size, t_mem, t_seg)
         self.gpu = _core.Gpu(mem_size=launch.mem_size, max_block_dim=32 * warps)
-        self._load(launch.entry, launch.words)
+        if launch.words:
+            self._load(launch.entry, launch.words)
         for addr, words in launch.memory.items():
             self._load(addr, words)
         regs = {hr.ENTRY: launch.entry, hr.GRID_DIM: launch.grid, hr.BLOCK_DIM: launch.block}
@@ -173,19 +174,25 @@ class Lockstep:
         return (f"word={r.word:#010x} swrite={r.swrite} vwrite={vw} exec={r.exec_after:#010x} "
                 f"mw={r.mwrites} event={r.event} fault={r.fault}")
 
-    async def run(self, max_cycles: int = 200_000) -> Result:
+    async def run(self, max_cycles: int = 200_000, reset: bool = True,
+                  kill_at: int | None = None) -> Result:
+        """Run the launch to completion. With kill_at, abort the core in that cycle and
+        return without the end-of-launch checks. reset=False keeps the core's state from a
+        previous run (it must be idle)."""
         dut, ln = self.dut, self.ln
         ensure_clock(dut)
-        dut.rst_n.value = 0
         dut.start.value = 0
+        dut.kill.value = 0
         dut.new_launch.value = 0
         dut.if_resp_valid.value = 0
         dut.rd_valid.value = 0
         dut.at_valid.value = 0
         dut.ack_valid.value = 0
-        for _ in range(2):
-            await RisingEdge(dut.clk)
-        dut.rst_n.value = 1
+        if reset:
+            dut.rst_n.value = 0
+            for _ in range(2):
+                await RisingEdge(dut.clk)
+            dut.rst_n.value = 1
         dut.mem_last.value = ln.mem_size - 4
         dut.entry.value = ln.entry
         dut.block_dim.value = ln.block
@@ -198,6 +205,15 @@ class Lockstep:
         for now in range(max_cycles):
             await FallingEdge(dut.clk)
             await Timer(1, unit="ns")
+            if kill_at is not None and now == kill_at + 1:
+                dut.kill.value = 0
+                assert int(dut.idle.value), "core not idle after kill"
+                return Result(now, len(self.records), None, self.records)
+            if kill_at is not None and now == kill_at:
+                dut.kill.value = 1
+                dut.start.value = 0
+                await RisingEdge(dut.clk)
+                continue
             # ---- dispatch (core.md 11.1): cycle 1, or the first idle cycle of the core
             if int(dut.block_done.value):
                 done_blocks += 1

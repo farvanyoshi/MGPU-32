@@ -22,7 +22,8 @@ T_MEM, T_SEG = 100, 8
 
 def timed_cycles(ln: Launch) -> int:
     g = _core.Gpu(mem_size=ln.mem_size, max_block_dim=32 * W)
-    g.mem_write(ln.entry, b"".join(w.to_bytes(4, "little") for w in ln.words))
+    if ln.words:
+        g.mem_write(ln.entry, b"".join(w.to_bytes(4, "little") for w in ln.words))
     for addr, words in ln.memory.items():
         g.mem_write(addr, b"".join(w.to_bytes(4, "little") for w in words))
     from mgpu import hostregs as hr
@@ -314,3 +315,80 @@ async def random_single_warp_programs(dut):
         dut._log.info(f"seed {1000 + seed}: {len(case.words)} words, grid {case.grid} x {block}")
         await lockstep(dut, case.words, grid=case.grid, block=block, args=case.args,
                        memory=case.memory, mem_size=case.mem_size)
+
+
+async def suite(dut, progs, label):
+    diffs = []
+    for p in progs:
+        if "src" in p:
+            ln = dict(words=assemble(p["src"], CODE).words, grid=p["grid"], block=p["block"],
+                      args=p["args"], memory=p["data"], mem_size=p["mem"])
+        else:
+            ln = dict(words=[], entry=p["entry"], grid=p["grid"], block=p["block"], args=p["args"],
+                      memory=p["image"], mem_size=p["mem"])
+        dut._log.info(f"{label}: {p['name']}")
+        launch = Launch(**{"entry": CODE, **ln})
+        res = await Lockstep(dut, launch, W, T_MEM, T_SEG).run(max_cycles=2_000_000)
+        want = timed_cycles(launch)
+        if res.cycles != want:
+            diffs.append((p["name"], res.cycles, want))
+    dut._log.info(f"{label}: {len(progs)} programs in lockstep; cycle count differs from the "
+                  f"timing model on {len(diffs)}: {diffs}")
+
+
+@cocotb.test()
+async def directed_suite(dut):
+    """Every directed program of tests/sim that fits the core."""
+    import directed
+    await suite(dut, directed.harvest(32 * W), "directed")
+
+
+@cocotb.test()
+async def kernel_suite(dut):
+    """Every launch of the kernel suite (tests/kernels) at the small problem sizes."""
+    import directed
+    await suite(dut, directed.harvest_kernels(32 * W), "kernels")
+
+
+@cocotb.test()
+async def barriers_and_fences(dut):
+    """BAR after outstanding stores, FENCE, and a barrier completed by an EXIT."""
+    await lockstep(dut, f"""
+        S_LI s1, {DATA}
+        {LANE_ADDR.format(sh=2, dst="v2")}
+        S_GETSR s2, WARP_ID
+        S_SHLI s3, s2, 7
+        V_ADD v2, v2, s3
+        V_SW v1, 0(v2)
+        BAR
+        V_LW v3, 128(v2)                ; the next warp's stores are visible
+        V_SW v3, 0x1000(v2)
+        FENCE
+        S_ADDI s4, s2, -3
+        S_BZ s4, leave                  ; warp 3 exits; the others wait for it at the BAR
+        V_STS v1, 0(v2)
+        BAR
+        V_LDS v4, 4(v2)
+        EXIT
+leave:  EXIT""", block=256, args=[DATA], check_cycles=True)
+
+
+@cocotb.test()
+async def kill_and_restart(dut):
+    """Abort a block in flight, then run another launch on the same core without a reset."""
+    loop = f"""S_LI s1, {DATA}
+        V_GETSR v1, TID                 ; one word per thread: no races between warps
+        V_SHLI v1, v1, 2
+        V_ADD v2, v1, s1
+        S_ADDI s5, s0, 200
+top:    V_LW v3, 0(v2)
+        V_ADDI v3, v3, 1
+        V_SW v3, 0(v2)
+        S_ADDI s5, s5, -1
+        S_BNZ s5, top
+        EXIT"""
+    words = assemble(loop, CODE).words
+    ln = Launch(words, entry=CODE, block=128, args=[DATA])
+    await Lockstep(dut, ln, W, T_MEM, T_SEG).run(kill_at=900)
+    res = await Lockstep(dut, Launch(words, entry=CODE, block=64, args=[DATA]), W, T_MEM, T_SEG).run(reset=False)
+    assert res.fault is None
