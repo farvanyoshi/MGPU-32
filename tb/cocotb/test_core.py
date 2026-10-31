@@ -23,7 +23,7 @@ def timed_cycles(ln: Launch) -> int:
     return model_cycles(ln, W, L, S, T_MEM, T_SEG)
 
 
-async def lockstep(dut, src_or_words, check_cycles=False, **kw):
+async def lockstep(dut, src_or_words, check_cycles=True, **kw):
     words = src_or_words if isinstance(src_or_words, list) else assemble(src_or_words, CODE).words
     ln = Launch(words, entry=CODE, **kw)
     res = await Lockstep(dut, ln, W, T_MEM, T_SEG).run()
@@ -310,6 +310,7 @@ async def suite(dut, progs, label):
             diffs.append((p["name"], res.cycles, want))
     dut._log.info(f"{label}: {len(progs)} programs in lockstep; cycle count differs from the "
                   f"timing model on {len(diffs)}: {diffs}")
+    assert not diffs, f"cycle counts differ from the timing model: {diffs}"
 
 
 @cocotb.test()

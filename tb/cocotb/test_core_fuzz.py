@@ -18,7 +18,7 @@ import cocotb
 from mgpu import _core, hostregs as hr
 from mgpu.fuzz import gen as fuzz_gen
 
-from lockstep import Launch, Lockstep
+from lockstep import Launch, Lockstep, model_cycles
 
 W = int(os.environ.get("W", "8"))
 SEEDS = int(os.environ.get("MGPU_RTL_FUZZ_SEEDS", "16"))
@@ -58,9 +58,11 @@ async def run_mode(dut, mode):
             res = await Lockstep(dut, ln, W).run(max_cycles=3_000_000)
         except AssertionError as e:
             raise AssertionError(f"{mode} seed {seed} (grid {case.grid} x {block}): {e}") from e
+        want = model_cycles(ln, W)
+        assert res.cycles == want, f"{mode} seed {seed}: {res.cycles} cycles, timing model {want}"
         ran += 1
         faults += res.fault is not None
-    dut._log.info(f"{mode}: {ran} programs in lockstep ({faults} ended in a fault), "
+    dut._log.info(f"{mode}: {ran} programs in lockstep and cycle-exact ({faults} ended in a fault), "
                   f"{skipped} skipped (reference timeout)")
 
 

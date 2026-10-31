@@ -280,6 +280,8 @@ Shared-memory and LSU occupancy include the conflict and segment terms of §8.
 The memory system is shared by all cores and both ports of each core:
 - It accepts at most one segment request every `T_seg` cycles. A request made at cycle *r* is
   accepted at `a = max(r, mem_free)`, and then `mem_free = a + T_seg`.
+- Requests are taken in the order they are made: by request cycle *r*, and within a cycle by core
+  index, the LSU port before the I-fetch port.
 - A READ completes at `a + T_mem + 8` (the eight data beats).
 - A WRITE is acknowledged at `a + T_mem`.
 - An ATOMIC holds the memory for two slots (`mem_free = a + 2·T_seg`) and completes at

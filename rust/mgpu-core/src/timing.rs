@@ -10,6 +10,9 @@ use crate::gpu::{AccessKind, Gpu, SimError, WARP};
 use crate::isa_gen::Op;
 use crate::trace::{EV_BAR, EV_EXIT, EV_FAULT};
 
+/// A cycle not known yet (a memory request not yet accepted).
+const PENDING: u64 = u64::MAX;
+
 /// Execution units (core.md §7).
 pub const SALU: usize = 0;
 pub const VALU: usize = 1;
@@ -91,11 +94,35 @@ impl TimingReport {
     }
 }
 
-/// Shared memory system (core.md §11.4).
+/// Shared memory system (core.md §11.4). Requests are queued with the cycle in which they
+/// are made and accepted in time order: at the start of each cycle, that cycle's requests in
+/// (core, port) order, the LSU port before the I-fetch port.
 struct Memory {
     free: u64,
     latency: u64,
     seg: u64,
+    queue: Vec<MemReq>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ReqKind {
+    /// I-cache fill of `line` into entry `idx`.
+    Fill {
+        line: u64,
+        idx: usize,
+    },
+    Load,
+    Store,
+    Atomic,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MemReq {
+    r: u64,
+    core: usize,
+    port: u8, // 0 LSU, 1 I-fetch
+    warp: usize,
+    kind: ReqKind,
 }
 
 impl Memory {
@@ -104,14 +131,16 @@ impl Memory {
         self.free = a + slots * self.seg;
         a
     }
-    fn read(&mut self, r: u64) -> u64 {
-        self.accept(r, 1) + self.latency + 8
+    /// Completion (READ, ATOMIC) or acknowledgement (WRITE) cycle of an accepted request.
+    fn serve(&mut self, q: &MemReq) -> u64 {
+        match q.kind {
+            ReqKind::Fill { .. } | ReqKind::Load => self.accept(q.r, 1) + self.latency + 8,
+            ReqKind::Store => self.accept(q.r, 1) + self.latency,
+            ReqKind::Atomic => self.accept(q.r, 2) + 2 * self.latency + 8,
+        }
     }
-    fn write(&mut self, r: u64) -> u64 {
-        self.accept(r, 1) + self.latency
-    }
-    fn atomic(&mut self, r: u64) -> u64 {
-        self.accept(r, 2) + 2 * self.latency + 8
+    fn next_request(&self) -> Option<u64> {
+        self.queue.iter().map(|q| q.r).min()
     }
 }
 
@@ -129,6 +158,9 @@ struct WarpT {
     /// Arrival cycle at the barrier (valid while wait_bar).
     bar_arrival: u64,
     last_store_ack: u64,
+    /// Load/atomic segment requests not yet accepted, and the latest completion so far.
+    mem_pending: u64,
+    mem_last_done: u64,
     exec: u32,
     /// Waiting reason while not ready: 2 mem, 3 bar, 4 fence, 5 in flight (STALL_NAMES index).
     waiting: usize,
@@ -246,6 +278,7 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
         free: 0,
         latency: tc.mem_latency,
         seg: tc.seg_cycles,
+        queue: Vec::new(),
     };
     let mut cores: Vec<CoreT> = (0..tc.cores)
         .map(|_| CoreT {
@@ -270,8 +303,44 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
         if now > tc.max_cycles {
             return Err(SimError::Timeout(tc.max_cycles));
         }
+        // ---- memory: accept the requests made in this cycle (§11.4)
+        let mut due: Vec<MemReq> = Vec::new();
+        mem.queue.retain(|q| {
+            if q.r <= now {
+                due.push(*q);
+                false
+            } else {
+                true
+            }
+        });
+        due.sort_by_key(|q| (q.r, q.core, q.port));
+        for q in &due {
+            let done = mem.serve(q);
+            let core = &mut cores[q.core];
+            match q.kind {
+                ReqKind::Fill { line, idx } => {
+                    if core.icache[idx] == (line, PENDING) {
+                        core.icache[idx] = (line, done);
+                    }
+                    core.warps[q.warp].ibuf_at = Some(done + 2);
+                }
+                ReqKind::Store => {
+                    let w = &mut core.warps[q.warp];
+                    w.last_store_ack = w.last_store_ack.max(done);
+                }
+                ReqKind::Load | ReqKind::Atomic => {
+                    let w = &mut core.warps[q.warp];
+                    w.mem_last_done = w.mem_last_done.max(done);
+                    w.mem_pending -= 1;
+                    if w.mem_pending == 0 {
+                        w.ready_at = w.mem_last_done + 2; // completes at last_done + 1
+                    }
+                }
+            }
+        }
+
         let mut next_event = u64::MAX;
-        for core in cores.iter_mut() {
+        for (ci, core) in cores.iter_mut().enumerate() {
             // ---- block completion and dispatch (§11.1)
             if let Some(d) = core.done_at {
                 if now > d {
@@ -298,6 +367,8 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
                         wait_bar: false,
                         bar_arrival: 0,
                         last_store_ack: 0,
+                        mem_pending: 0,
+                        mem_last_done: 0,
                         exec: launch_exec(block_dim, w),
                         waiting: 5,
                     })
@@ -337,14 +408,23 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
                     let idx = (line as usize) % tc.icache_lines;
                     let (tag, valid_from) = core.icache[idx];
                     if tag == line {
+                        // a fill is accepted in the cycle after its miss, before any other
+                        // lookup, so valid_from is always known here
+                        debug_assert!(valid_from != PENDING);
                         rep.icache_hits += 1;
                         valid_from.max(now) + 2
                     } else {
                         rep.icache_misses += 1;
                         rep.mem_reads += 1;
-                        let done = mem.read(now + 1);
-                        core.icache[idx] = (line, done);
-                        done + 2
+                        mem.queue.push(MemReq {
+                            r: now + 1,
+                            core: ci,
+                            port: 1,
+                            warp: i,
+                            kind: ReqKind::Fill { line, idx },
+                        });
+                        core.icache[idx] = (line, PENDING);
+                        PENDING // set when the fill is accepted
                     }
                 };
                 let w = &mut core.warps[i];
@@ -426,29 +506,38 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
                         } else {
                             let n = segments(acc.lanes, &acc.addrs) as u64;
                             let first = t + 2 + passes;
-                            let mut last_done = first;
-                            for k in 0..n {
-                                let r = first + k;
-                                match acc.kind {
-                                    AccessKind::Load => {
-                                        rep.mem_reads += 1;
-                                        last_done = last_done.max(mem.read(r));
-                                    }
-                                    AccessKind::Store => {
-                                        rep.mem_writes += 1;
-                                        w.last_store_ack = w.last_store_ack.max(mem.write(r));
-                                    }
-                                    _ => {
-                                        rep.mem_atomics += 1;
-                                        last_done = last_done.max(mem.atomic(r));
-                                    }
+                            let kind = match acc.kind {
+                                AccessKind::Load => {
+                                    rep.mem_reads += n;
+                                    ReqKind::Load
                                 }
-                            }
-                            let c = match acc.kind {
                                 AccessKind::Store => {
-                                    (t + 2 + passes + n).saturating_sub(1).max(t + 2)
+                                    rep.mem_writes += n;
+                                    ReqKind::Store
                                 }
-                                _ => last_done + 1,
+                                _ => {
+                                    rep.mem_atomics += n;
+                                    ReqKind::Atomic
+                                }
+                            };
+                            for k in 0..n {
+                                mem.queue.push(MemReq {
+                                    r: first + k,
+                                    core: ci,
+                                    port: 0,
+                                    warp: i,
+                                    kind,
+                                });
+                            }
+                            let c = match kind {
+                                ReqKind::Store => (first + n).saturating_sub(1).max(t + 2),
+                                // completion is known once the last request is accepted
+                                _ if n > 0 => {
+                                    w.mem_pending = n;
+                                    w.mem_last_done = first;
+                                    PENDING
+                                }
+                                _ => first + 1,
                             };
                             (passes + n, 1, Some(c))
                         }
@@ -457,7 +546,7 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
                 core.unit_free[unit] = t + 2 + occ;
                 rep.busy_by_unit[unit] += occ;
                 let c = complete.take().unwrap_or(t + 2 + occ + lat - 1);
-                w.ready_at = c + 1;
+                w.ready_at = if c == PENDING { PENDING } else { c + 1 };
                 w.waiting = if unit == LSU && complete_is_mem(&acc) {
                     2
                 } else {
@@ -542,6 +631,9 @@ pub fn launch_timed(gpu: &mut Gpu, tc: &TimingConfig) -> Result<TimingReport, Si
             if issued {
                 next_event = now + 1;
             }
+        }
+        if let Some(r) = mem.next_request() {
+            next_event = next_event.min(r.max(now + 1));
         }
         // advance; idle cycles are skipped but still counted in core_active_cycles/stalls
         let next = if next_event == u64::MAX {

@@ -136,9 +136,6 @@ From Python, use `Device(timing={"warps": 8, "lanes": 8, "mem_latency": 100})`; 
 
 ## 4. Model limitations *(informative)*
 
-- **Request order.** Memory requests are granted in the order the model generates them, not strictly
-  by request cycle across cores. This only matters when several cores contend for memory in the same
-  cycles.
 - **Execution order.** Instructions execute functionally at issue. For racy programs, the interleaving
   may therefore differ from what the hardware would produce (equivalence.md W1). Well-defined programs
   are unaffected.
