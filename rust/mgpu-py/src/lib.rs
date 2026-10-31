@@ -129,6 +129,13 @@ impl PyGpu {
         self.inner.run().map_err(|e| to_pyerr(py, e))
     }
 
+    /// Value CLOCK reads in the following steps (cycles since the block started, as an
+    /// external timing source such as the RTL sees it); None restores step counting.
+    #[pyo3(signature = (clock=None))]
+    fn set_clock(&mut self, clock: Option<u64>) {
+        self.inner.clock_override = clock;
+    }
+
     fn runnable(&self) -> Vec<(u32, u32)> {
         self.inner.runnable()
     }
