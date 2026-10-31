@@ -60,3 +60,14 @@ def test_srf():
 def test_vrf():
     run_cocotb("mgpu_vrf", sources("core/mgpu_vrf.sv"), "test_regfiles", parameters={"NR": 4, "NW": 5},
                extra_env={"RF": "vrf", "NR": "4", "NW": "5"})
+
+
+VEXEC_SOURCES = (FPU_SOURCES + SFU_SOURCES[2:] + ("units/mgpu_int_lane.sv", "units/mgpu_valu.sv",
+                 "core/mgpu_decode.sv", "core/mgpu_vexec.sv", "../tb/rtl/mgpu_vexec_probe.sv"))
+
+
+@pytest.mark.parametrize("kind,lanes,lat", [(0, 8, 2), (0, 32, 2), (1, 8, 4), (1, 4, 4), (2, 2, 8)])
+def test_vexec(kind, lanes, lat):
+    params = {"KIND": kind, "LANES": lanes, "LAT": lat}
+    run_cocotb("mgpu_vexec_probe", sources(*dict.fromkeys(VEXEC_SOURCES)), "test_vexec",
+               parameters=params, extra_env={k: str(v) for k, v in params.items()})

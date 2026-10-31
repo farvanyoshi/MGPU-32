@@ -6,8 +6,8 @@ COMMON := common/mgpu_pipe.sv
 UNITS  := units/mgpu_round.sv units/mgpu_int_lane.sv units/mgpu_valu.sv \
           units/mgpu_fpu_lane.sv units/mgpu_fpu.sv \
           units/mgpu_sfu_rom.sv units/mgpu_sfu_lane.sv units/mgpu_sfu.sv
-CORE   := core/mgpu_decode.sv core/mgpu_srf.sv core/mgpu_vrf.sv
-TOPS   := mgpu_pipe mgpu_valu mgpu_fpu mgpu_sfu mgpu_decode mgpu_srf mgpu_vrf
+CORE   := core/mgpu_decode.sv core/mgpu_srf.sv core/mgpu_vrf.sv core/mgpu_vexec.sv
+TOPS   := mgpu_pipe mgpu_valu mgpu_fpu mgpu_sfu mgpu_decode mgpu_srf mgpu_vrf mgpu_vexec
 
 SOURCES = $(wildcard $(PKG)) $(COMMON) $(wildcard $(UNITS)) $(wildcard $(CORE))
 
