@@ -6,7 +6,7 @@ import pytest
 
 from mgpu.device import Device, rust_available
 
-from asm import assemble
+from mgpu.asm import assemble
 
 CODE = 0x1000
 DATA = 0x10000
@@ -32,7 +32,8 @@ class Run:
         params.setdefault("keep_state", True)
         params.setdefault("trace", True)
         self.dev = Device(backend, mem_size=mem, **params)
-        self.words = assemble(src, CODE)
+        self.program = assemble(src, CODE)
+        self.words = self.program.words
         self.dev.write_words(CODE, self.words)
         for addr, words in (data or {}).items():
             self.dev.write_words(addr, words)

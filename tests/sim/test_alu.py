@@ -2,6 +2,8 @@
 
 import pytest
 
+from mgpu.isa import encode
+
 M = 0xFFFFFFFF
 
 INT_CASES = [
@@ -241,8 +243,10 @@ def test_clock_is_monotonic(run):
     assert r.s(2) > r.s(1)
 
 
-@pytest.mark.parametrize("word_src", ["S_GETSR s1, 16", "S_GETSR s1, 18", "S_GETSR s1, 6",
-                                      "V_GETSR v1, 15", "V_GETSR v1, 19", "V_GETSR v1, 31"])
-def test_getsr_illegal_ids(run, word_src):
-    r = run(f"S_LI s31, 0\n{word_src}\nEXIT")   # illegal even with EXEC = 0 ([DEC-4])
+@pytest.mark.parametrize("mn, sr", [("S_GETSR", 16), ("S_GETSR", 18), ("S_GETSR", 6),
+                                    ("V_GETSR", 15), ("V_GETSR", 19), ("V_GETSR", 31)])
+def test_getsr_illegal_ids(run, mn, sr):
+    # The assembler refuses these, so encode them directly; illegal even with EXEC = 0 ([DEC-4])
+    word = encode(mn, rd=1, ra=sr)
+    r = run(f"S_LI s31, 0\n.word {word}\nEXIT")
     assert r.res.status == 1 and r.res.err_pc == 0x1008 and r.res.err_info == r.words[2]
