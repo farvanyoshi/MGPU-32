@@ -88,10 +88,15 @@ module mgpu_dispatcher #(
       end
     end
     all_done = state == S_RUN && !fault_seen && blocks_done + n_done == grid_dim;
-    // same-cycle priority of a fault at issue, then a hold on every core
-    for (int c = 0; c < C; c++) begin
-      halt[c] = fault_seen;
-      for (int j = 0; j < c; j++) if (fault_issue[j]) halt[c] = 1'b1;
+  end
+
+  // same-cycle priority of a fault at issue, then a hold on every core (one assign per core,
+  // so that halt[c] visibly depends on the lower cores only)
+  for (genvar c = 0; c < C; c++) begin : g_halt
+    if (c == 0) begin : g_first
+      assign halt[c] = fault_seen;
+    end else begin : g_rest
+      assign halt[c] = fault_seen || |fault_issue[c-1:0];
     end
   end
 

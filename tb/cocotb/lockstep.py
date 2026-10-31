@@ -95,8 +95,8 @@ class Result:
 
 
 def model_cycles(ln: Launch, warps: int, lanes: int = 8, sfu_lanes: int = 2,
-                 t_mem: int = 100, t_seg: int = 8) -> int:
-    """CYCLES of the launch under the timing model (docs/uarch/core.md 11), one core."""
+                 t_mem: int = 100, t_seg: int = 8, cores: int = 1) -> int:
+    """CYCLES of the launch under the timing model (docs/uarch/core.md 11)."""
     g = _core.Gpu(mem_size=ln.mem_size, max_block_dim=32 * warps)
     if ln.words:
         g.mem_write(ln.entry, b"".join((w & 0xFFFFFFFF).to_bytes(4, "little") for w in ln.words))
@@ -105,7 +105,7 @@ def model_cycles(ln: Launch, warps: int, lanes: int = 8, sfu_lanes: int = 2,
     for off, v in {hr.ENTRY: ln.entry, hr.GRID_DIM: ln.grid, hr.BLOCK_DIM: ln.block,
                    **{hr.ARG(i): a for i, a in enumerate(ln.args)}}.items():
         g.reg_write(off, v)
-    rep = g.launch_timed(cores=1, warps=warps, lanes=lanes, sfu_lanes=sfu_lanes,
+    rep = g.launch_timed(cores=cores, warps=warps, lanes=lanes, sfu_lanes=sfu_lanes,
                          mem_latency=t_mem, seg_cycles=t_seg)
     return rep["cycles"]
 
@@ -125,13 +125,15 @@ def ensure_clock(dut) -> None:
 
 
 class Lockstep:
-    def __init__(self, dut, launch: Launch, warps: int, t_mem: int = 100, t_seg: int = 8):
-        self.dut, self.ln, self.W = dut, launch, warps
-        # With one warp per block nothing depends on the schedule, so atomic values are
-        # compared too; otherwise rule E4 (warp_key, C-37) applies.
-        self.strict = launch.block <= 32
-        self.mem = Memory(launch.mem_size, t_mem, t_seg)
-        self.gpu = _core.Gpu(mem_size=launch.mem_size, max_block_dim=32 * warps)
+    def __init__(self, dut, launch: Launch, warps: int, t_mem: int = 100, t_seg: int = 8,
+                 cores: int = 1, allow_rejected: bool = False):
+        self.dut, self.ln, self.W, self.C = dut, launch, warps, cores
+        # With one warp per block running at a time nothing depends on the schedule, so
+        # atomic values are compared too; otherwise rule E4 (warp_key, C-37) applies.
+        self.strict = launch.block <= 32 and (cores == 1 or launch.grid == 1)
+        self.mem = self._make_memory(launch.mem_size, t_mem, t_seg)
+        self.gpu = _core.Gpu(mem_size=launch.mem_size, max_block_dim=32 * warps,
+                             resident_blocks=cores)
         if launch.words:
             self._load(launch.entry, launch.words)
         for addr, words in launch.memory.items():
@@ -140,13 +142,18 @@ class Lockstep:
         regs.update({hr.ARG(i): a for i, a in enumerate(launch.args)})
         for off, v in regs.items():
             self.gpu.reg_write(off, v)
-        if not self.gpu.begin():
+        self.started = self.gpu.begin()      # False: launch validation failed
+        if not self.started and not allow_rejected:
             raise ValueError("launch rejected by the engine")
         self.records: list[tuple[int, CommitRecord]] = []
         # MGPU_LOCKSTEP_DUMP=<file>: append "issue_cycle block warp pc" per retired instruction
         path = os.environ.get("MGPU_LOCKSTEP_DUMP")
         self.dump = open(path, "a") if path else None
         self.block_start = 0
+
+    @staticmethod
+    def _make_memory(size, t_mem, t_seg):
+        return Memory(size, t_mem, t_seg)
 
     def _load(self, addr, words):
         self.mem.write_words(addr, words)

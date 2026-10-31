@@ -517,9 +517,10 @@ module mgpu_core
             + 6'(lsu_req.valid && lsu_req.kind == MK_WRITE && lsu_req.warp == 5'(w))
             - 6'(ack_valid && ack_warp == 5'(w));
       end
-      if (fq_emit) begin
+      if (fq_emit) begin                 // the faulting warp is finished too
         active <= 1'b0;
         halt <= 1'b1;
+        in_flight[WB'(fq_warp)] <= 1'b0;
       end
 
       // issue
