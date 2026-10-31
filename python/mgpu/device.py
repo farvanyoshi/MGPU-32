@@ -119,7 +119,12 @@ def kernel_arg(a) -> int:
 
 
 class Device:
-    def __init__(self, backend: str = "rust", **params):
+    """`timing`: None for functional simulation, or a dict of timing-model parameters
+    (cores, warps, lanes, sfu_lanes, mem_latency, seg_cycles, icache_lines; {} = defaults).
+    With timing, every launch runs under the cycle-level model (Rust backend only) and
+    `timing_report` holds the result."""
+
+    def __init__(self, backend: str = "rust", timing: dict | None = None, **params):
         if backend == "model":
             from .model import Gpu
         elif backend == "rust":
@@ -127,6 +132,10 @@ class Device:
         else:
             raise ValueError(f"unknown backend {backend!r}; choose from {BACKENDS}")
         self.backend = backend
+        if timing is not None and backend != "rust":
+            raise ValueError("the timing model needs the rust backend")
+        self.timing = timing
+        self.timing_report: dict | None = None
         self.gpu = Gpu(**params)
         self.mem_size = self.gpu.mem_size
         self.heap_ptr = HEAP_START
@@ -176,7 +185,10 @@ class Device:
         self.reg_write(H.BLOCK_DIM, block)
         for n, a in enumerate(args):
             self.reg_write(H.ARG(n), a)
-        self.reg_write(H.GO, 1)
+        if self.timing is not None:
+            self.timing_report = self.gpu.launch_timed(**self.timing)
+        else:
+            self.reg_write(H.GO, 1)
         return self.result()
 
     # ---- programs, buffers and kernels ---------------------------------------------------------

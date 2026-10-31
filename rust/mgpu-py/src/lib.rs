@@ -1,10 +1,11 @@
 //! Python bindings: `mgpu._core`. The `Gpu` class has the same API as
 //! `mgpu.model.Gpu`, so `mgpu.device.Device` can use either backend.
 
-use mgpu_core::{fp, sfu, Config, Record, SimError};
+use mgpu_core::timing::{STALL_NAMES, UNIT_NAMES};
+use mgpu_core::{fp, launch_timed, sfu, Config, Record, SimError, TimingConfig};
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 fn to_pyerr(py: Python<'_>, e: SimError) -> PyErr {
     match e {
@@ -140,6 +141,69 @@ impl PyGpu {
     ) -> PyResult<Bound<'py, PyTuple>> {
         let r = self.inner.step(block, warp).map_err(|e| to_pyerr(py, e))?;
         record(py, &r)
+    }
+
+    /// Launch the kernel described by the host registers under the cycle-level timing model
+    /// (docs/uarch/core.md section 11). Returns the timing report as a dict.
+    #[pyo3(signature = (cores=1, warps=8, lanes=8, sfu_lanes=2, mem_latency=100, seg_cycles=8,
+                        icache_lines=16, max_cycles=1u64 << 40))]
+    #[allow(clippy::too_many_arguments)]
+    fn launch_timed<'py>(
+        &mut self,
+        py: Python<'py>,
+        cores: usize,
+        warps: u32,
+        lanes: u32,
+        sfu_lanes: u32,
+        mem_latency: u64,
+        seg_cycles: u64,
+        icache_lines: usize,
+        max_cycles: u64,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let tc = TimingConfig {
+            cores,
+            warps,
+            lanes,
+            sfu_lanes,
+            mem_latency,
+            seg_cycles,
+            icache_lines,
+            max_cycles,
+        };
+        let r = launch_timed(&mut self.inner, &tc).map_err(|e| to_pyerr(py, e))?;
+        let d = PyDict::new(py);
+        d.set_item("cycles", r.cycles)?;
+        d.set_item("issued", r.issued)?;
+        d.set_item("ipc", r.ipc())?;
+        d.set_item("issue_utilization", r.issue_utilization())?;
+        d.set_item("simd_utilization", r.simd_utilization())?;
+        d.set_item("vector_issued", r.vector_issued)?;
+        d.set_item("core_active_cycles", r.core_active_cycles)?;
+        let by_unit = |v: &[u64; 5]| -> PyResult<Bound<'py, PyDict>> {
+            let u = PyDict::new(py);
+            for (n, x) in UNIT_NAMES.iter().zip(v) {
+                u.set_item(*n, *x)?;
+            }
+            Ok(u)
+        };
+        d.set_item("issue_by_unit", by_unit(&r.issue_by_unit)?)?;
+        d.set_item("busy_by_unit", by_unit(&r.busy_by_unit)?)?;
+        let st = PyDict::new(py);
+        for (n, x) in STALL_NAMES.iter().zip(&r.stalls) {
+            st.set_item(*n, *x)?;
+        }
+        d.set_item("stalls", st)?;
+        for (k, v) in [
+            ("mem_reads", r.mem_reads),
+            ("mem_writes", r.mem_writes),
+            ("mem_atomics", r.mem_atomics),
+            ("icache_hits", r.icache_hits),
+            ("icache_misses", r.icache_misses),
+            ("shared_conflict_cycles", r.shared_conflict_cycles),
+        ] {
+            d.set_item(k, v)?;
+        }
+        Ok(d)
     }
 
     /// Commit records of the last launch as canonical tuples (see mgpu.trace).

@@ -71,6 +71,16 @@ int main(void) {
     if (mgpu_reg_read(g, MGPU_REG_STATUS) != 2 || mgpu_reg_read(g, MGPU_REG_ERR_PC) != CODE + 12)
         { puts("fault not reported"); return 1; }
 
+    /* 4. the same launch under the timing model: same results, a cycle count */
+    mgpu_mem_write(g, OUT, zero, sizeof zero);
+    setup(g, 3, 64);
+    mgpu_timing_config tcfg;
+    mgpu_timing_report trep;
+    mgpu_timing_config_default(&tcfg);
+    if (mgpu_launch_timed(g, &tcfg, &trep) != MGPU_OK || check_output(g, 192, "timed")) return 1;
+    if (trep.issued != 30 || trep.cycles < 100 || mgpu_reg_read(g, MGPU_REG_CYCLES) != trep.cycles)
+        { printf("timing report %llu %llu\n", (unsigned long long)trep.issued, (unsigned long long)trep.cycles); return 1; }
+
     mgpu_destroy(g);
     puts("OK");
     return 0;

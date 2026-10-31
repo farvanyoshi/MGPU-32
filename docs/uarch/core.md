@@ -77,8 +77,9 @@ The I-cache is 2 KiB, direct-mapped, with 16 lines of 128 bytes (one memory segm
 **When the next instruction is fetched:**
 - For a *sequential* instruction (anything except S_BZ, S_BNZ, S_J and EXIT), fetch of PC + 4
   starts in the cycle after issue. It is a prefetch that overlaps execution.
-- For a branch, the fetch starts in the writeback cycle, once the target is known. This costs a
-  branch two extra cycles per warp, but no misprediction penalty, since there is no prediction.
+- For a branch, the fetch starts in the writeback cycle, once the target is known. The buffer is
+  then valid one cycle after the warp could otherwise issue, so a branch costs one extra cycle per
+  warp. There is no misprediction penalty, because there is no prediction.
 
 A fetch from a PC beyond `MEM_SIZE − 4` does not touch the cache. It turns the buffer entry into a
 fetch-fault marker, which faults when the warp is next scheduled ([MEM-7]).

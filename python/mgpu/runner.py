@@ -93,12 +93,27 @@ def main(argv=None) -> int:
     ap.add_argument("--trace", type=int, nargs="?", const=200, metavar="N",
                     help="print the first N committed instructions (default 200)")
     ap.add_argument("--stats", action="store_true", help="print instruction mix and SIMD utilization")
+    t = ap.add_argument_group("timing model (docs/uarch)")
+    t.add_argument("--timing", action="store_true", help="run under the cycle-level timing model")
+    t.add_argument("--cores", type=int, default=1)
+    t.add_argument("--warps", type=int, default=8, help="warp slots per core")
+    t.add_argument("--lanes", type=int, default=8, help="physical vector lanes")
+    t.add_argument("--mem-latency", type=int, default=100)
+    t.add_argument("--seg-cycles", type=int, default=8, help="cycles per 128-byte segment")
     ap.add_argument("--dump", action="append", default=[], metavar="ADDR:COUNT[:DTYPE]",
                     help="print COUNT elements of memory after the run (ADDR may be a symbol)")
     args = ap.parse_args(argv)
 
     trace = args.trace is not None or args.stats
-    dev = Device(args.backend, mem_size=args.mem_size, max_steps=args.max_steps, trace=trace)
+    timing = None
+    if args.timing:
+        if args.backend != "rust":
+            print("mgpu-run: --timing needs the rust backend", file=sys.stderr)
+            return 1
+        timing = dict(cores=args.cores, warps=args.warps, lanes=args.lanes,
+                      mem_latency=args.mem_latency, seg_cycles=args.seg_cycles)
+    dev = Device(args.backend, timing=timing, mem_size=args.mem_size, max_steps=args.max_steps,
+                 trace=trace)
     program = None
     try:
         path = Path(args.program)
@@ -127,7 +142,7 @@ def main(argv=None) -> int:
     label = f"{name} @ {entry:#x}" if name else f"{entry:#x}"
     try:
         res = dev.launch(entry, args.grid, args.block, [kernel_arg(a) for a in kargs])
-    except SimTimeout as e:
+    except (SimTimeout, ValueError) as e:
         print(f"mgpu-run: {e}", file=sys.stderr)
         return 3
     if args.trace is not None:
@@ -144,6 +159,9 @@ def main(argv=None) -> int:
     if args.stats:
         from .stats import trace_stats
         print(trace_stats(dev.trace, args.block).report())
+    if dev.timing_report is not None:
+        from .stats import timing_text
+        print(timing_text(dev.timing_report))
     import numpy as np
     for path, buf in outputs:
         np.save(path, buf.read())

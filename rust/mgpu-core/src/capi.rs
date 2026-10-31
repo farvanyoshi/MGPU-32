@@ -4,6 +4,7 @@
 use std::ptr;
 
 use crate::gpu::{Config, Gpu, SimError};
+use crate::timing::{launch_timed, TimingConfig};
 use crate::trace::Record;
 
 pub const MGPU_OK: i32 = 0;
@@ -298,4 +299,102 @@ pub unsafe extern "C" fn mgpu_runnable(gpu: *const Gpu, pairs: *mut u32, max_pai
         }
     }
     all.len() as u32
+}
+
+#[repr(C)]
+pub struct MgpuTimingConfig {
+    pub cores: u32,
+    pub warps: u32,
+    pub lanes: u32,
+    pub sfu_lanes: u32,
+    pub mem_latency: u64,
+    pub seg_cycles: u64,
+    pub icache_lines: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct MgpuTimingReport {
+    pub cycles: u64,
+    pub issued: u64,
+    pub issue_by_unit: [u64; 5],
+    pub busy_by_unit: [u64; 5],
+    pub vector_issued: u64,
+    pub lane_slots: u64,
+    pub stalls: [u64; 6],
+    pub core_active_cycles: u64,
+    pub mem_reads: u64,
+    pub mem_writes: u64,
+    pub mem_atomics: u64,
+    pub icache_hits: u64,
+    pub icache_misses: u64,
+    pub shared_conflict_cycles: u64,
+}
+
+/// Fill `cfg` with the default timing parameters (docs/uarch/README.md).
+///
+/// # Safety
+/// `cfg` must be null or point to a writable `MgpuTimingConfig`.
+#[no_mangle]
+pub unsafe extern "C" fn mgpu_timing_config_default(cfg: *mut MgpuTimingConfig) {
+    let Some(cfg) = cfg.as_mut() else { return };
+    let d = TimingConfig::default();
+    *cfg = MgpuTimingConfig {
+        cores: d.cores as u32,
+        warps: d.warps,
+        lanes: d.lanes,
+        sfu_lanes: d.sfu_lanes,
+        mem_latency: d.mem_latency,
+        seg_cycles: d.seg_cycles,
+        icache_lines: d.icache_lines as u32,
+    };
+}
+
+/// Launch the kernel in the host registers under the timing model; fill `out`.
+///
+/// # Safety
+/// `gpu` must be valid; `cfg` must point to a valid config; `out` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn mgpu_launch_timed(
+    gpu: *mut Gpu,
+    cfg: *const MgpuTimingConfig,
+    out: *mut MgpuTimingReport,
+) -> i32 {
+    let (Some(g), Some(c)) = (gpu.as_mut(), cfg.as_ref()) else {
+        return MGPU_ERR_NULL;
+    };
+    let tc = TimingConfig {
+        cores: c.cores as usize,
+        warps: c.warps,
+        lanes: c.lanes,
+        sfu_lanes: c.sfu_lanes,
+        mem_latency: c.mem_latency,
+        seg_cycles: c.seg_cycles,
+        icache_lines: c.icache_lines as usize,
+        ..TimingConfig::default()
+    };
+    match launch_timed(g, &tc) {
+        Ok(r) => {
+            if let Some(o) = out.as_mut() {
+                *o = MgpuTimingReport {
+                    cycles: r.cycles,
+                    issued: r.issued,
+                    issue_by_unit: r.issue_by_unit,
+                    busy_by_unit: r.busy_by_unit,
+                    vector_issued: r.vector_issued,
+                    lane_slots: r.lane_slots,
+                    stalls: r.stalls,
+                    core_active_cycles: r.core_active_cycles,
+                    mem_reads: r.mem_reads,
+                    mem_writes: r.mem_writes,
+                    mem_atomics: r.mem_atomics,
+                    icache_hits: r.icache_hits,
+                    icache_misses: r.icache_misses,
+                    shared_conflict_cycles: r.shared_conflict_cycles,
+                };
+            }
+            MGPU_OK
+        }
+        Err(e) => err_code(&e),
+    }
 }

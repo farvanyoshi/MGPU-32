@@ -102,6 +102,28 @@ uint64_t  mgpu_steps(const mgpu_gpu *gpu);
 int32_t   mgpu_step(mgpu_gpu *gpu, uint32_t block, uint32_t warp, mgpu_record *out);
 uint32_t  mgpu_runnable(const mgpu_gpu *gpu, uint32_t *pairs, uint32_t max_pairs);
 
+/* Cycle-level timing model (docs/uarch/core.md section 11). */
+typedef struct {
+    uint32_t cores, warps, lanes, sfu_lanes;   /* defaults: 1, 8, 8, 2 */
+    uint64_t mem_latency, seg_cycles;          /* defaults: 100, 8 */
+    uint32_t icache_lines;                     /* default: 16 (128-byte lines) */
+} mgpu_timing_config;
+
+typedef struct {
+    uint64_t cycles, issued;
+    uint64_t issue_by_unit[5];                 /* salu, valu, fpu, sfu, lsu */
+    uint64_t busy_by_unit[5];
+    uint64_t vector_issued, lane_slots;
+    uint64_t stalls[6];                        /* unit, ifetch, mem, bar, fence, inflight */
+    uint64_t core_active_cycles;
+    uint64_t mem_reads, mem_writes, mem_atomics;
+    uint64_t icache_hits, icache_misses, shared_conflict_cycles;
+} mgpu_timing_report;
+
+void      mgpu_timing_config_default(mgpu_timing_config *cfg);
+/* Launch the kernel in the host registers under the timing model (like writing GO). */
+int32_t   mgpu_launch_timed(mgpu_gpu *gpu, const mgpu_timing_config *cfg, mgpu_timing_report *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -65,3 +65,21 @@ def trace_stats(records, block_dim: int) -> TraceStats:
         st.memory_words += len(r.mwrites)
         st.barriers += ins.mnemonic == "BAR"
     return st
+
+
+def timing_text(rep: dict) -> str:
+    """Human-readable timing-model report (Device.timing_report)."""
+    lines = [f"cycles              {rep['cycles']:,}",
+             f"instructions        {rep['issued']:,}  (IPC {rep['ipc']:.3f}, "
+             f"issue slots used {100 * rep['issue_utilization']:.1f}%)",
+             f"SIMD utilization    {100 * rep['simd_utilization']:.1f}% of 32 lanes",
+             "unit busy:          " + ", ".join(
+                 f"{u} {100 * b / max(1, rep['core_active_cycles']):.0f}%"
+                 for u, b in rep["busy_by_unit"].items()),
+             "idle cycles:        " + (", ".join(
+                 f"{k} {v:,}" for k, v in rep["stalls"].items() if v) or "none"),
+             f"memory segments     {rep['mem_reads']:,} read, {rep['mem_writes']:,} write, "
+             f"{rep['mem_atomics']:,} atomic",
+             f"I-cache             {rep['icache_hits']:,} hits, {rep['icache_misses']:,} misses",
+             f"bank-conflict cycles {rep['shared_conflict_cycles']:,}"]
+    return "\n".join(lines)
