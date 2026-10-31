@@ -15,6 +15,7 @@ from cocotb.triggers import FallingEdge, RisingEdge, Timer
 from mgpu.model.execute import atom_op
 
 from lockstep import MREQ
+from memory import BeatMemory
 
 C = int(os.environ.get("C", "4"))
 T = int(os.environ.get("T_MEM", "20"))
@@ -62,48 +63,6 @@ class Reference:
             self.expect[done].append((core, "at", (q["warp"], q["seg"], tuple(sorted(old.items())))))
 
 
-class BeatMemory:
-    """The memory behind the 128-bit port."""
-
-    def __init__(self, init):
-        self.mem = list(init)
-        self.free = 0
-        self.rbeats = {}                           # cycle -> (tag, data, last)
-        self.acks = {}                             # cycle -> tag
-        self.wr = None                             # (addr, mask, beats so far, started)
-
-    def step_inputs(self, now):
-        return now >= self.free, self.rbeats.pop(now, None), self.acks.pop(now, None)
-
-    def observe(self, now, dut, ready):
-        consumed = self.wr is not None
-        if self.wr is not None:
-            assert int(dut.mwd_valid.value), f"cycle {now}: write beat missing"
-            self.wr[2].append(int(dut.mwd_data.value))
-            assert int(dut.mwd_last.value) == (len(self.wr[2]) == 8)
-            if len(self.wr[2]) == 8:
-                addr, mask, beats = self.wr[:3]
-                for k in range(32):
-                    if mask >> k & 1:
-                        self.mem[addr // 4 + k] = (beats[k // 4] >> (32 * (k % 4))) & 0xFFFFFFFF
-                self.wr = None
-        if int(dut.mreq_valid.value) and ready:
-            op, addr, tag = int(dut.mreq_op.value), int(dut.mreq_addr.value), int(dut.mreq_tag.value)
-            assert addr % 128 == 0 and 0 <= addr < SEGS * 128
-            self.free = now + 8
-            if op == 0:
-                data = self.mem[addr // 4:addr // 4 + 32]
-                for k in range(8):
-                    beat = sum(data[4 * k + i] << (32 * i) for i in range(4))
-                    self.rbeats[now + T + 1 + k] = (tag, beat, k == 7)
-            else:
-                assert int(dut.mwd_valid.value), f"cycle {now}: beat 0 must come with the WRITE"
-                self.wr = (addr, int(dut.mreq_mask.value), [int(dut.mwd_data.value)])
-                self.acks[now + T] = tag
-        elif not consumed:
-            assert not int(dut.mwd_valid.value), f"cycle {now}: stray write beat"
-
-
 def random_lsu(rng):
     kind = rng.choices([0, 1, 2], weights=[4, 4, 2])[0]
     q = dict(valid=1, kind=kind, warp=rng.randrange(8), seg=rng.randrange(32),
@@ -132,7 +91,8 @@ async def random_traffic(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     rng = random.Random(21 + C + T)
     init = [rng.getrandbits(32) for _ in range(SEGS * 32)]
-    ref, memory = Reference(init), BeatMemory(init)
+    ref, memory = Reference(init), BeatMemory(SEGS * 128, T)
+    memory.write_words(0, init)
     dut.rst_n.value = 0
     dut.if_req_valid.value = 0
     dut.lsu_req.value = 0
@@ -151,14 +111,7 @@ async def random_traffic(dut):
     n_cycles = int(os.environ.get("CYCLES", "60000"))
     for now in range(n_cycles):
         await FallingEdge(dut.clk)
-        ready, rbeat, ack = memory.step_inputs(now)
-        dut.mreq_ready.value = int(ready)
-        dut.mrd_valid.value = int(rbeat is not None)
-        if rbeat:
-            dut.mrd_tag.value, dut.mrd_data.value, dut.mrd_last.value = rbeat
-        dut.mack_valid.value = int(ack is not None)
-        if ack is not None:
-            dut.mack_tag.value = ack
+        ready = memory.drive(dut, now)
         # stand-in cores: occasional bursts of LSU requests, sparse I-fetch reads
         lsu_v, if_v = 0, 0
         lsu_words, if_addr, if_id = [0] * C, [0] * C, [0] * C
@@ -218,6 +171,6 @@ async def random_traffic(dut):
             raise AssertionError(f"cycle {now}: queue overflow, lcnt={dut.u_arb.lcnt.value} icnt={dut.u_arb.icnt.value} "
                                  f"busy={dut.u_atom.a_busy.value} wb={dut.u_atom.a_wb.value} free={memory.free}")
         await RisingEdge(dut.clk)
-    assert memory.mem == ref.mem, "final memory differs"
+    assert [memory.word(4 * i) for i in range(SEGS * 32)] == ref.mem, "final memory differs"
     assert all(counts[k] > 50 for k in ("if", "rd", "ack", "at")), dict(counts)
     dut._log.info(f"C={C} T_mem={T}: responses matched {dict(counts)}; final memory matches")

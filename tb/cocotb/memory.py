@@ -87,3 +87,62 @@ class Memory:
             return None
         rid, addr = self.ifetch_resp.pop(now)
         return rid, self.line(addr)
+
+
+class BeatMemory(Memory):
+    """The memory behind mgpu_top's 128-bit memory port (interfaces.md 2), with T_seg = 8:
+    a request is accepted when memory is free (free = a + 8); a WRITE's beats arrive in
+    cycles a .. a + 7 and are applied with the last one, acknowledged at a + T_mem; a READ's
+    data (as of cycle a) returns in beats at a + T_mem + 1 .. a + T_mem + 8."""
+
+    def __init__(self, size: int, t_mem: int = 100):
+        super().__init__(size, t_mem, 8)
+        self.rbeats = {}                           # cycle -> (tag, data, last)
+        self.back = {}                             # cycle -> tag (write acknowledgements)
+        self.wr = None                             # (addr, mask, beats so far)
+
+    def inputs(self, now: int):
+        """(ready, read beat or None, acknowledgement tag or None) for cycle `now`."""
+        return now >= self.free, self.rbeats.pop(now, None), self.back.pop(now, None)
+
+    def observe(self, now: int, dut, ready: bool) -> None:
+        """Take this cycle's request and write beat from the port (after inputs settled)."""
+        consumed = self.wr is not None
+        if self.wr is not None:
+            assert int(dut.mwd_valid.value), f"cycle {now}: write beat missing"
+            self.wr[2].append(int(dut.mwd_data.value))
+            assert int(dut.mwd_last.value) == (len(self.wr[2]) == 8)
+            if len(self.wr[2]) == 8:
+                addr, mask, beats = self.wr
+                for k in range(32):
+                    if mask >> k & 1:
+                        self.write_words(addr + 4 * k, [(beats[k // 4] >> (32 * (k % 4))) & 0xFFFFFFFF])
+                self.wr = None
+        if int(dut.mreq_valid.value) and ready:
+            op, addr, tag = int(dut.mreq_op.value), int(dut.mreq_addr.value), int(dut.mreq_tag.value)
+            assert addr % 128 == 0 and addr + 128 <= self.size, f"cycle {now}: bad address {addr:#x}"
+            self.free = now + 8
+            if op == 0:
+                self.reads += 1
+                data = self.line(addr)
+                for k in range(8):
+                    self.rbeats[now + self.t_mem + 1 + k] = (tag, (data >> (128 * k)) & ((1 << 128) - 1), k == 7)
+            else:
+                self.writes += 1
+                assert int(dut.mwd_valid.value), f"cycle {now}: beat 0 must come with the WRITE"
+                self.wr = (addr, int(dut.mreq_mask.value), [int(dut.mwd_data.value)])
+                self.back[now + self.t_mem] = tag
+        elif not consumed:
+            assert not int(dut.mwd_valid.value), f"cycle {now}: stray write beat"
+
+    def drive(self, dut, now: int) -> bool:
+        """Drive this cycle's memory-side inputs; returns `ready`."""
+        ready, rbeat, ack = self.inputs(now)
+        dut.mreq_ready.value = int(ready)
+        dut.mrd_valid.value = int(rbeat is not None)
+        if rbeat:
+            dut.mrd_tag.value, dut.mrd_data.value, dut.mrd_last.value = rbeat
+        dut.mack_valid.value = int(ack is not None)
+        if ack is not None:
+            dut.mack_tag.value = ack
+        return ready

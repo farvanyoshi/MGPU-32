@@ -95,3 +95,8 @@ def test_memsys(cores, t_mem):
     run_cocotb("mgpu_memsys_probe", sources("top/mgpu_mem_arbiter.sv", "top/mgpu_atomic_unit.sv",
                                             "../tb/rtl/mgpu_memsys_probe.sv"), "test_memsys",
                parameters={"C": cores}, extra_env={"C": str(cores), "T_MEM": str(t_mem)})
+
+
+def test_axil():
+    run_cocotb("mgpu_axil_probe", sources("top/mgpu_axil_csr.sv", "top/mgpu_host_regs.sv",
+                                          "../tb/rtl/mgpu_axil_probe.sv"), "test_axil")
