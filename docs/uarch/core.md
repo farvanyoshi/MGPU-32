@@ -69,8 +69,12 @@ The I-cache is 2 KiB, direct-mapped, with 16 lines of 128 bytes (one memory segm
 - **Tag:** address bits [31:11]; **index:** bits [10:7]; **word:** bits [6:2].
 - **Hit:** the word is available one cycle after the request (F). Decode takes one more cycle (D),
   then the instruction buffer is valid.
-- **Miss:** the line is read through the I-fetch memory port. Requests that hit the same line while
-  the fill is pending wait for it. One fill is outstanding at a time.
+- **Miss:** the line is read through the I-fetch memory port. The entry immediately takes the new
+  tag and becomes *pending*. Requests that hit a pending line wait for its fill. Each fill is tagged
+  with the slot of the warp that missed (that warp cannot fetch again before its word arrives, so the
+  tag is unique). Fills may overlap; the memory serializes them (§11.4).
+- **Fill response:** the word goes to every warp waiting for that fill. The line is installed only if
+  the entry is still pending for that same fill; a later miss to the same index may have replaced it.
 - **Invalidation:** every line is invalidated at launch. Code must not change during a kernel
   ([MEM-2]), so no other coherence is needed.
 

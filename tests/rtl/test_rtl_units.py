@@ -71,3 +71,9 @@ def test_vexec(kind, lanes, lat):
     params = {"KIND": kind, "LANES": lanes, "LAT": lat}
     run_cocotb("mgpu_vexec_probe", sources(*dict.fromkeys(VEXEC_SOURCES)), "test_vexec",
                parameters=params, extra_env={k: str(v) for k, v in params.items()})
+
+
+@pytest.mark.parametrize("warps", [8, 3])
+def test_fetch(warps):
+    run_cocotb("mgpu_fetch", sources("core/mgpu_decode.sv", "core/mgpu_fetch.sv"), "test_fetch",
+               parameters={"W": warps}, extra_env={"W": str(warps)})
