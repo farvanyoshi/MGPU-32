@@ -84,7 +84,7 @@ results exactly `LAT` cycles later. The core (Phase 5b) feeds them P passes per 
 | FPU (`test_fpu`) | 31,194 lane operations (special-value cross products, cancellations, random), at L = 8 and L = 2 | `mgpu._core` |
 | SFU (`test_sfu`) | 15,180 operations (specials, every path-selecting exponent, powers of two, random), at S = 2 and S = 1 | `mgpu._core` |
 | Bulk random (`tb/cpp`, `make bulk`) | 20,000 vectors per FPU op in CI; 200,000 per op locally (2 million lane results, 0 mismatches) | `libmgpu_core` (`mgpu_fp_op`) |
-| SFU binade sweep (`make sweep`) | Every 256th mantissa in CI. Locally at stride 64: 3,801,088 results, 0 mismatches; `STRIDE=1` checks every mantissa (about 243 million results) | `libmgpu_core` |
+| SFU binade sweep (`make sweep`) | Every 256th mantissa in CI. **Exhaustive locally (`STRIDE=1`): every mantissa of 29 binades, 243,269,632 results, 0 mismatches** | `libmgpu_core` |
 
 The cocotb testbenches also check the pipeline: back-to-back issue, bubbles, and that each result
 appears exactly `LAT` cycles after its input. Each testbench was checked to fail when a one-line
