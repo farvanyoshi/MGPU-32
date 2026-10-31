@@ -16,7 +16,7 @@ reviewed before continuing.
 | 2 | `bp2-simulator` | Python reference model + fast Rust simulator (PyO3 + C ABI), differential fuzzing | **done** |
 | 3 | `bp3-toolchain` | Assembler, disassembler, runner, host API, kernel suite | **done** |
 | 4 | `bp4-uarch` | Microarchitecture specification + cycle-level timing model | **done** |
-| 5 | `bp5-rtl-units` | RTL execution units (ALU, FPU, SFU) verified with cocotb/Verilator | planned |
+| 5 | `bp5-rtl-units` | RTL execution units (ALU, FPU, SFU) verified with cocotb/Verilator | **done** |
 | 6 | `bp6-rtl-core` | Full RTL core, lockstep trace co-simulation | planned |
 | 7 | `bp7-rtl-top` / `v1.0` | Multi-core top level, host interface, synthesis report | planned |
 
@@ -46,6 +46,7 @@ with a barrier, and a weak memory model.
 | [`docs/uarch/README.md`](docs/uarch/README.md) | Reference microarchitecture: parameters, top level, core, interfaces, timing contract |
 | [`docs/uarch/performance.md`](docs/uarch/performance.md) | Timing model and the design-space measurements behind the parameters |
 | [`docs/uarch/verification.md`](docs/uarch/verification.md) | How the RTL will be verified against the simulators |
+| [`docs/rtl/README.md`](docs/rtl/README.md) | The SystemVerilog: layout, conventions, how to lint and test, what is verified |
 
 ## Repository layout
 
@@ -62,6 +63,8 @@ python/mgpu/               Python package: ISA tables, bit-exact float32, refere
 rust/mgpu-core/            fast simulator engine and cycle-level timing model
                            (also a C library: include/mgpu_core.h)
 rust/mgpu-py/              Python bindings (mgpu._core)
+rtl/                       SystemVerilog (packages generated from spec/; units: VALU, FPU, SFU)
+tb/                        RTL testbenches: cocotb (Python) and a Verilator C++ bulk harness
 tools/                     generators (gen_isa.py, gen_sfu_tables.py), sfu_accuracy.py, bench.py,
                            sweep.py (design-space sweep with the timing model)
 tests/                     pytest suite (ISA, float, simulator, assembler, kernels, fuzzing, C ABI)
@@ -106,6 +109,8 @@ python -m mgpu.fuzz --seeds 2500                 # 10,000 random programs: model
 python tools/bench.py                            # simulator throughput
 mgpu-run kernels/saxpy.s ... --timing --warps 8  # cycle-level timing of the reference design
 python tools/sweep.py                            # design-space sweep (warps, lanes, memory latency)
+pip install -e ".[rtl]" && make -C rtl lint      # RTL: Verilator + cocotb, lint
+python -m pytest -m rtl                          # RTL unit testbenches (bit-exact vs the engine)
 ```
 
 Generated files must stay in sync with their sources:
