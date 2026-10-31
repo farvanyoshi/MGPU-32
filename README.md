@@ -15,7 +15,7 @@ reviewed before continuing.
 | 1 | `bp1-isa-spec` | Normative ISA v1.0, machine-readable instruction table, bit-exact SFU | **done** |
 | 2 | `bp2-simulator` | Python reference model + fast Rust simulator (PyO3 + C ABI), differential fuzzing | **done** |
 | 3 | `bp3-toolchain` | Assembler, disassembler, runner, host API, kernel suite | **done** |
-| 4 | `bp4-uarch` | Microarchitecture specification + cycle-level timing model | planned |
+| 4 | `bp4-uarch` | Microarchitecture specification + cycle-level timing model | **done** |
 | 5 | `bp5-rtl-units` | RTL execution units (ALU, FPU, SFU) verified with cocotb/Verilator | planned |
 | 6 | `bp6-rtl-core` | Full RTL core, lockstep trace co-simulation | planned |
 | 7 | `bp7-rtl-top` / `v1.0` | Multi-core top level, host interface, synthesis report | planned |
@@ -43,21 +43,27 @@ with a barrier, and a weak memory model.
 | [`docs/toolchain/assembler.md`](docs/toolchain/assembler.md) | Assembly language: syntax, expressions, directives, pseudo-instructions, output formats |
 | [`docs/toolchain/tools.md`](docs/toolchain/tools.md) | `mgpu-run`, `mgpu-dis` and the Python host API |
 | [`kernels/README.md`](kernels/README.md) | Example kernels and what their statistics show |
+| [`docs/uarch/README.md`](docs/uarch/README.md) | Reference microarchitecture: parameters, top level, core, interfaces, timing contract |
+| [`docs/uarch/performance.md`](docs/uarch/performance.md) | Timing model and the design-space measurements behind the parameters |
+| [`docs/uarch/verification.md`](docs/uarch/verification.md) | How the RTL will be verified against the simulators |
 
 ## Repository layout
 
 ```
 spec/isa.toml              machine-readable instruction table (single source of truth)
 spec/sfu/*.txt             normative SFU coefficient tables
-docs/isa/, docs/sim/,      ISA specification; simulator guide; assembler and tools guides
-  docs/toolchain/
+docs/isa/, docs/sim/,      ISA specification; simulator guide; assembler and tools guides;
+  docs/toolchain/,         microarchitecture specification
+  docs/uarch/
 kernels/                   example kernels (saxpy, reduce, matmul, conv3x3, scan, ...)
 python/mgpu/               Python package: ISA tables, bit-exact float32, reference model,
                            assembler/disassembler (mgpu.asm), Device host API, mgpu-run,
                            fuzzers (python -m mgpu.fuzz)
-rust/mgpu-core/            fast simulator engine (also a C library: include/mgpu_core.h)
+rust/mgpu-core/            fast simulator engine and cycle-level timing model
+                           (also a C library: include/mgpu_core.h)
 rust/mgpu-py/              Python bindings (mgpu._core)
-tools/                     generators (gen_isa.py, gen_sfu_tables.py), sfu_accuracy.py, bench.py
+tools/                     generators (gen_isa.py, gen_sfu_tables.py), sfu_accuracy.py, bench.py,
+                           sweep.py (design-space sweep with the timing model)
 tests/                     pytest suite (ISA, float, simulator, assembler, kernels, fuzzing, C ABI)
 ```
 
@@ -98,6 +104,8 @@ mgpu-as kernels/matmul.s --lst matmul.lst        # assemble, with a listing
 mgpu-dis matmul.bin                              # back to reassemblable source
 python -m mgpu.fuzz --seeds 2500                 # 10,000 random programs: model vs Rust engine
 python tools/bench.py                            # simulator throughput
+mgpu-run kernels/saxpy.s ... --timing --warps 8  # cycle-level timing of the reference design
+python tools/sweep.py                            # design-space sweep (warps, lanes, memory latency)
 ```
 
 Generated files must stay in sync with their sources:

@@ -12,6 +12,10 @@ Both follow the same **reference schedule** (§3) and emit the same **commit rec
 and host registers. The differential fuzzer checks exactly that (§6). Speeds were measured with
 `tools/bench.py` (150–190× apart).
 
+The Rust engine also contains the **cycle-level timing model** of the reference
+microarchitecture: `Device(timing={...})` or `mgpu-run --timing`. It is documented in
+[`docs/uarch/performance.md`](../uarch/performance.md).
+
 ## 1. Quick start
 
 ```bash
