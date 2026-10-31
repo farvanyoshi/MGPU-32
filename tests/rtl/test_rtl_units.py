@@ -44,3 +44,19 @@ SFU_SOURCES = ("common/mgpu_pipe.sv", "units/mgpu_round.sv", "units/mgpu_sfu_rom
 def test_sfu(lanes):
     run_cocotb("mgpu_sfu", sources(*SFU_SOURCES), "test_sfu", parameters={"S": lanes},
                extra_env={"S": str(lanes), "LAT": "8"})
+
+
+def test_core_decode():
+    run_cocotb("mgpu_core_decode_probe",
+               sources("core/mgpu_decode.sv", "../tb/rtl/mgpu_core_decode_probe.sv"),
+               "test_core_decode")
+
+
+def test_srf():
+    run_cocotb("mgpu_srf", sources("core/mgpu_srf.sv"), "test_regfiles", extra_env={"RF": "srf"})
+
+
+@pytest.mark.parametrize("lanes", [8, 32])
+def test_vrf(lanes):
+    run_cocotb("mgpu_vrf", sources("core/mgpu_vrf.sv"), "test_regfiles", parameters={"L": lanes},
+               extra_env={"RF": "vrf", "L": str(lanes)})

@@ -43,7 +43,7 @@ requires_rtl = pytest.mark.skipif(not available(), reason="needs verilator and c
 
 def sources(*names: str) -> list[Path]:
     """Package files first, then the requested rtl/ files."""
-    pkgs = [RTL / "pkg/mgpu_isa_pkg.sv", RTL / "pkg/mgpu_fp_pkg.sv"]
+    pkgs = [RTL / "pkg/mgpu_isa_pkg.sv", RTL / "pkg/mgpu_fp_pkg.sv", RTL / "pkg/mgpu_core_pkg.sv"]
     return [p for p in pkgs if p.exists()] + [RTL / n for n in names]
 
 
