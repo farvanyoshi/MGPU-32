@@ -57,13 +57,15 @@ The dispatcher works through these states:
    - `ENTRY`
    - `ARG0`–`ARG7`
 
-   It then increments `next_block`. Cores are chosen in ascending index order, at most one start per
-   cycle. The core initializes its warps itself (core.md §2.2).
+   It then increments `next_block`. Every idle core receives a block in the same cycle, in ascending
+   core order (this includes a core in its `block_done` cycle). The first block a core receives in a
+   launch invalidates its I-cache and resets its round-robin pointers, so every launch starts from
+   fresh cores, as the timing model assumes. The core initializes its warps itself (core.md §2.2).
 3. **RUN**: each core raises `block_done` for one cycle when all its warps have exited. When
    `blocks_done = GRID_DIM`, the launch is done: `busy` drops and `STATUS` = 0.
-4. **ABORT**: when any core reports a fault, the dispatcher latches it (§6), stops dispatching,
-   raises `abort` to every core, and waits until every core is idle. Then `busy` drops and `STATUS`
-   holds the code.
+4. **ABORT**: when a core issues a faulting instruction, the dispatcher stops dispatching and holds
+   every core (§6). Once the fault is reported and all memory traffic has settled, it kills every
+   core. Then `busy` drops and `STATUS` holds the code.
 
 Blocks may run on any core, in any order, concurrently ([EX-1]). All warps of a block start on the
 same core, in the same cycle.
@@ -101,14 +103,19 @@ Shared-memory atomics never reach this unit: the LSU executes them in the core (
 
 ## 6. Faults and abort
 
-A core reports a fault with `{code, pc, block, warp, lane, info}`. The dispatcher keeps the **first**
-report. If several arrive in the same cycle, the lowest core index wins ([FLT-2]).
-
-On `abort`:
-- every core stops issuing new instructions;
-- instructions already past operand read may complete ([FLT-1]);
-- outstanding memory requests drain;
-- each core then returns to idle.
+Every fault is detected when its instruction issues (core.md §5). That cycle defines the reported
+fault and `CYCLES` = issue cycle + 1 (core.md §11.6), exactly as in the timing model:
+- **Same cycle.** In the cycle a core issues a faulting instruction, every higher-numbered core is
+  held and issues nothing (`halt`). The timing model handles cores in index order and stops at the
+  fault.
+- **Later cycles.** From the next cycle, every core is held. So exactly one instruction faults
+  ([FLT-2]).
+- **Drain.** Instructions already issued complete ([FLT-1]). When no core has any left
+  (`fault_go`), the faulting core reports `{code, pc, warp, lane, info}`; the dispatcher adds the
+  block.
+- **Settle.** Once every core's memory traffic has settled (store acknowledgements, I-cache fills),
+  the dispatcher ends the launch and kills every core, so nothing from the aborted launch reaches the
+  next one.
 
 The faulting instruction itself never writes registers or memory. The LSU guarantees this by checking
 all lanes before issuing any request (core.md §8.1). Other units fault only in decode, before execution.

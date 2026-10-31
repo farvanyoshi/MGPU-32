@@ -82,3 +82,9 @@ def test_fetch(warps):
 def test_host_regs():
     run_cocotb("mgpu_host_regs", sources("top/mgpu_host_regs.sv"), "test_host_regs",
                parameters={"W": 8, "MEM_SIZE": 1 << 20}, extra_env={"W": "8", "MEM_SIZE": str(1 << 20)})
+
+
+@pytest.mark.parametrize("cores", [4, 1])
+def test_dispatcher(cores):
+    run_cocotb("mgpu_dispatcher", sources("top/mgpu_dispatcher.sv"), "test_dispatcher",
+               parameters={"C": cores}, extra_env={"C": str(cores)})

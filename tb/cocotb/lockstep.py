@@ -206,6 +206,8 @@ class Lockstep:
         ensure_clock(dut)
         dut.start.value = 0
         dut.kill.value = 0
+        dut.halt_in.value = 0          # a lone core: no other core can fault
+        dut.fault_go.value = 1
         dut.new_launch.value = 0
         dut.if_resp_valid.value = 0
         dut.rd_valid.value = 0

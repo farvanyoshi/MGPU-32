@@ -46,7 +46,8 @@ module mgpu_fetch
     input  logic [31:0][31:0]   mresp_data,
     // events for the performance counters
     output logic                ev_hit,
-    output logic                ev_miss
+    output logic                ev_miss,
+    output logic                fills_pending  // some warp waits for an I-cache fill
 );
   // ---- cache arrays
   logic [LINES-1:0]            valid, pend;
@@ -61,6 +62,7 @@ module mgpu_fetch
   logic [W-1:0][31:0] d_word;
   logic [W-1:0]       busy;
   assign busy = ibuf_valid | d_valid | wait_v;
+  assign fills_pending = |wait_v;
 
   // ---- round-robin choice
   logic [W-1:0] elig;

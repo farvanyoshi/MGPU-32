@@ -39,6 +39,12 @@ module mgpu_core
     input  logic [31:0]             mem_last,     // MEM_SIZE - 4
     output logic                    idle,
     output logic                    block_done,   // first idle cycle after the block completes
+    // faults across cores (top.md 6)
+    input  logic                    halt_in,      // issue nothing this cycle (another core faulted)
+    input  logic                    fault_go,     // every core has drained: the fault may be reported
+    output logic                    fault_issue,  // a faulting instruction issues this cycle
+    output logic                    busy_ops,     // instructions in flight (other than a fault)
+    output logic                    mem_quiet,    // no memory request outstanding
     // I-fetch memory port
     output logic                    if_req_valid,
     output logic [31:0]             if_req_addr,
@@ -120,7 +126,7 @@ module mgpu_core
       .consume, .ibuf_valid, .ibuf_word, .ibuf_ctrl, .ibuf_ff,
       .mreq_valid(if_req_valid), .mreq_addr(if_req_addr), .mreq_id(if_req_id),
       .mresp_valid(if_resp_valid), .mresp_id(if_resp_id), .mresp_data(if_resp_data),
-      .ev_hit, .ev_miss);
+      .ev_hit, .ev_miss, .fills_pending);
 
   // ------------------------------------------------------------------ scheduler
   logic [4:0][7:0] rem;                 // cycles until free_at(U), saturating at 0
@@ -144,7 +150,7 @@ module mgpu_core
   always_comb begin
     for (int w = 0; w < W; w++) begin
       wunit[w] = unit_slot(ibuf_ctrl[w].unit, ibuf_ff[w] || ibuf_ctrl[w].illegal);
-      ready[w] = active && !halt && live[w] && !exited[w] && !in_flight[w] && ibuf_valid[w]
+      ready[w] = active && !halt && !halt_in && live[w] && !exited[w] && !in_flight[w] && ibuf_valid[w]
                  && !(wait_bar[w] && !release_now) && !(wait_fence[w] && stores_out[w] != 6'd0);
       issuable[w] = ready[w] && rem[wunit[w]] <= 8'd2;
     end
@@ -310,7 +316,11 @@ module mgpu_core
   retire_t    fq;                 // the fault waiting for in-flight instructions to drain
   logic [4:0] fq_warp;
   logic       fq_emit;
-  assign fq_emit = fq.valid && (in_flight & ~(W'(1) << fq_warp)) == '0;
+  logic [W-1:0] others;
+  assign others = fq.valid ? in_flight & ~(W'(1) << fq_warp) : in_flight;
+  assign busy_ops = |others;
+  assign fq_emit = fq.valid && !busy_ops && fault_go;
+  assign fault_issue = g_any && f0;
 
   always_ff @(posedge clk) begin
     if (!rst_n || accept) begin
@@ -427,6 +437,11 @@ module mgpu_core
   end
   assign block_done = active && all_exited && no_stores;
   assign idle = !active;
+  logic fills_pending;
+  always_comb begin
+    mem_quiet = !fills_pending && !if_req_valid && !busy_ops;
+    for (int w = 0; w < W; w++) if (stores_out[w] != 6'd0) mem_quiet = 1'b0;
+  end
 
   always_comb begin
     consume = '0;
@@ -457,6 +472,7 @@ module mgpu_core
       r_block_dim <= block_dim;
       r_grid_dim <= grid_dim;
       r_num_warps <= num_warps;
+      if (new_launch) rr <= '0;          // every launch starts from fresh cores
       for (int w = 0; w < W; w++) begin
         live[w] <= w < int'(num_warps);
         pc[w] <= entry;
