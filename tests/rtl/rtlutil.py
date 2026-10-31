@@ -12,6 +12,12 @@ RTL = ROOT / "rtl"
 BUILD = ROOT / "build" / "rtl"
 
 
+# The verilator wheel's verilated.mk leaves CFG_CXXFLAGS_PCH_I empty, so designs large
+# enough to use a precompiled header pass its file name to g++ as an input file. A
+# command-line variable in MAKEFLAGS overrides it with GCC's flag.
+PIP_VERILATOR_MAKEFLAGS = "CFG_CXXFLAGS_PCH_I=-include"
+
+
 def verilator_root() -> str | None:
     """VERILATOR_ROOT for the pip-bundled Verilator, or None if verilator is on PATH."""
     if shutil.which("verilator") and not os.environ.get("MGPU_FORCE_PIP_VERILATOR"):
@@ -49,6 +55,7 @@ def run_cocotb(top: str, srcs: list, test_module: str, parameters: dict | None =
     if root:
         os.environ["VERILATOR_ROOT"] = root
         os.environ["PATH"] = os.path.join(root, "bin") + os.pathsep + os.environ["PATH"]
+        os.environ["MAKEFLAGS"] = PIP_VERILATOR_MAKEFLAGS
     params = parameters or {}
     build_dir = BUILD / (top + tag + "".join(f"_{k}{v}" for k, v in sorted(params.items())))
     runner = get_runner("verilator")

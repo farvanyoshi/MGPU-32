@@ -21,6 +21,11 @@ python -m pytest -m rtl        # build every unit with Verilator and run its coc
   the binary bundled in the `verilator` pip package, with `VERILATOR_ROOT` set for you.
 - **Python tests.** The RTL tests are marked `rtl`, and are skipped automatically when Verilator or
   cocotb is missing.
+- **Wheel workaround.** The `verilator` wheel ships a `verilated.mk` with an empty
+  `CFG_CXXFLAGS_PCH_I`. Designs large enough to use a precompiled header then fail to compile with
+  "`Vtop__pch.h.fast: linker input file not found`". The test helper passes
+  `MAKEFLAGS=CFG_CXXFLAGS_PCH_I=-include` (GCC's flag) automatically; do the same if you invoke the
+  wheel's Verilator by hand.
 - **Build cache.** Builds are cached in `build/rtl/<unit>_<parameters>/`; delete that directory to
   force a rebuild.
 
