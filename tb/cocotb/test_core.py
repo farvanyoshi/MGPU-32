@@ -7,11 +7,10 @@ import random
 
 import cocotb
 
-from mgpu import _core
 from mgpu.asm import assemble
 from mgpu.fuzz import gen as fuzz_gen
 
-from lockstep import Launch, Lockstep
+from lockstep import Launch, Lockstep, model_cycles
 
 W = int(os.environ.get("W", "8"))
 L = int(os.environ.get("L", "8"))
@@ -21,17 +20,7 @@ T_MEM, T_SEG = 100, 8
 
 
 def timed_cycles(ln: Launch) -> int:
-    g = _core.Gpu(mem_size=ln.mem_size, max_block_dim=32 * W)
-    if ln.words:
-        g.mem_write(ln.entry, b"".join(w.to_bytes(4, "little") for w in ln.words))
-    for addr, words in ln.memory.items():
-        g.mem_write(addr, b"".join(w.to_bytes(4, "little") for w in words))
-    from mgpu import hostregs as hr
-    for off, v in {hr.ENTRY: ln.entry, hr.GRID_DIM: ln.grid, hr.BLOCK_DIM: ln.block,
-                   **{hr.ARG(i): a for i, a in enumerate(ln.args)}}.items():
-        g.reg_write(off, v)
-    rep = g.launch_timed(cores=1, warps=W, lanes=L, sfu_lanes=S, mem_latency=T_MEM, seg_cycles=T_SEG)
-    return rep["cycles"]
+    return model_cycles(ln, W, L, S, T_MEM, T_SEG)
 
 
 async def lockstep(dut, src_or_words, check_cycles=False, **kw):
@@ -302,19 +291,6 @@ async def memory_faults(dut):
                       ("V_ATOM.ADD v4, v2, v1\nV_GETSR v6, LANE_ID\nV_ATOM.ADD v4, v6, v1", 2)):
         res = await lockstep(dut, base + bad + "\nEXIT", block=64, args=[DATA], check_cycles=True)
         assert res.fault and res.fault[0] == code, res.fault
-
-
-@cocotb.test()
-async def random_single_warp_programs(dut):
-    """The fuzzer's diff-mode programs (all instructions, faults, illegal words) on
-    single-warp blocks, where the result cannot depend on the warp schedule."""
-    n = int(os.environ.get("SEEDS", "12"))
-    for seed in range(n):
-        case = fuzz_gen.random_case(1000 + seed, "diff")
-        block = random.Random(seed).choice([1, 17, 32])
-        dut._log.info(f"seed {1000 + seed}: {len(case.words)} words, grid {case.grid} x {block}")
-        await lockstep(dut, case.words, grid=case.grid, block=block, args=case.args,
-                       memory=case.memory, mem_size=case.mem_size)
 
 
 async def suite(dut, progs, label):

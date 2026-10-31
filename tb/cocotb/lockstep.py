@@ -93,6 +93,22 @@ class Result:
     records: list
 
 
+def model_cycles(ln: Launch, warps: int, lanes: int = 8, sfu_lanes: int = 2,
+                 t_mem: int = 100, t_seg: int = 8) -> int:
+    """CYCLES of the launch under the timing model (docs/uarch/core.md 11), one core."""
+    g = _core.Gpu(mem_size=ln.mem_size, max_block_dim=32 * warps)
+    if ln.words:
+        g.mem_write(ln.entry, b"".join((w & 0xFFFFFFFF).to_bytes(4, "little") for w in ln.words))
+    for addr, words in ln.memory.items():
+        g.mem_write(addr, b"".join((w & 0xFFFFFFFF).to_bytes(4, "little") for w in words))
+    for off, v in {hr.ENTRY: ln.entry, hr.GRID_DIM: ln.grid, hr.BLOCK_DIM: ln.block,
+                   **{hr.ARG(i): a for i, a in enumerate(ln.args)}}.items():
+        g.reg_write(off, v)
+    rep = g.launch_timed(cores=1, warps=warps, lanes=lanes, sfu_lanes=sfu_lanes,
+                         mem_latency=t_mem, seg_cycles=t_seg)
+    return rep["cycles"]
+
+
 class LockstepError(AssertionError):
     pass
 
