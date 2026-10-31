@@ -9,9 +9,10 @@ UNITS  := units/mgpu_round.sv units/mgpu_int_lane.sv units/mgpu_valu.sv \
 CORE   := core/mgpu_decode.sv core/mgpu_srf.sv core/mgpu_vrf.sv core/mgpu_vexec.sv \
           core/mgpu_fetch.sv core/mgpu_salu.sv core/mgpu_agen.sv core/mgpu_lsu.sv \
           core/mgpu_core.sv
-TOPLV  := top/mgpu_host_regs.sv top/mgpu_dispatcher.sv
+TOPLV  := top/mgpu_host_regs.sv top/mgpu_dispatcher.sv top/mgpu_mem_arbiter.sv \
+          top/mgpu_atomic_unit.sv
 TOPS   := mgpu_pipe mgpu_valu mgpu_fpu mgpu_sfu mgpu_decode mgpu_srf mgpu_vrf mgpu_vexec mgpu_fetch mgpu_salu mgpu_agen mgpu_lsu mgpu_core \
-          mgpu_host_regs mgpu_dispatcher
+          mgpu_host_regs mgpu_dispatcher mgpu_mem_arbiter mgpu_atomic_unit
 
 SOURCES = $(wildcard $(PKG)) $(COMMON) $(wildcard $(UNITS)) $(wildcard $(CORE)) $(wildcard $(TOPLV))
 

@@ -88,3 +88,10 @@ def test_host_regs():
 def test_dispatcher(cores):
     run_cocotb("mgpu_dispatcher", sources("top/mgpu_dispatcher.sv"), "test_dispatcher",
                parameters={"C": cores}, extra_env={"C": str(cores)})
+
+
+@pytest.mark.parametrize("cores,t_mem", [(4, 20), (1, 3), (2, 100)])
+def test_memsys(cores, t_mem):
+    run_cocotb("mgpu_memsys_probe", sources("top/mgpu_mem_arbiter.sv", "top/mgpu_atomic_unit.sv",
+                                            "../tb/rtl/mgpu_memsys_probe.sv"), "test_memsys",
+               parameters={"C": cores}, extra_env={"C": str(cores), "T_MEM": str(t_mem)})

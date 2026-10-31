@@ -96,6 +96,25 @@ package mgpu_core_pkg;
     logic [2:0]        aop;       // ATOMIC: operation (atom_kind)
   } mreq_t;
 
+  // A segment request on its way to memory (mgpu_mem_arbiter -> mgpu_atomic_unit). The tag
+  // routes the response: {core[3:0], port (1 = I-fetch), warp[4:0], seg[4:0], internal}.
+  typedef struct packed {
+    logic [1:0]        kind;      // MK_READ, MK_WRITE, MK_ATOMIC
+    logic [15:0]       tag;
+    logic [31:0]       addr;
+    logic [31:0]       wmask;
+    logic [31:0][31:0] wdata;
+    logic [31:0]       lanes;
+    logic [31:0][4:0]  off;
+    logic [31:0][31:0] opnd;
+    logic [2:0]        aop;
+  } sreq_t;
+
+  function automatic logic [15:0] mem_tag(input logic [3:0] core, input logic ifetch,
+                                          input logic [4:0] warp, input logic [4:0] seg);
+    return {core, ifetch, warp, seg, 1'b0};
+  endfunction
+
   function automatic logic is_load(input op_e op);
     return op inside {OP_S_LW, OP_V_LW, OP_V_LDS};
   endfunction

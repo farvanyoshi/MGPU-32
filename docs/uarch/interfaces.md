@@ -23,32 +23,45 @@ Conventions:
 
 ## 2. Memory port (`mgpu_top` ↔ memory)
 
+Four channels, like AXI's address, write-data, read-data and write-response channels. Read data and
+write acknowledgements have separate channels, because a READ's data and a WRITE's acknowledgement can
+complete in the same cycle and neither may be delayed (core.md §11.4). The GPU is always ready for
+read data and acknowledgements.
+
 **Request channel**
 
 | Signal | Dir | Width | Meaning |
 |---|---|---|---|
-| `mreq_valid` / `mreq_ready` | out / in | 1 / 1 | Handshake |
+| `mreq_valid` / `mreq_ready` | out / in | 1 / 1 | Handshake. Memory accepts a request when it is free (one every `T_seg` = 8 cycles) |
 | `mreq_op` | out | 2 | 0 READ, 1 WRITE |
 | `mreq_addr` | out | 32 | Segment address, 128-byte aligned |
-| `mreq_tag` | out | 8 | Returned with the response |
+| `mreq_tag` | out | 16 | Returned with the response |
 | `mreq_mask` | out | 32 | WRITE: word enables (bit *i* = word *i* of the segment) |
 
-**Write-data channel** (8 beats per WRITE, in order, after the request)
+**Write-data channel**: the 8 beats of a WRITE, beat *k* in cycle `a + k`, where `a` is the cycle
+the request is accepted (beat 0 comes with the request).
 
 | Signal | Dir | Width | Meaning |
 |---|---|---|---|
-| `mwd_valid` / `mwd_ready` | out / in | 1 / 1 | Handshake |
+| `mwd_valid` | out | 1 | Beat valid |
 | `mwd_data` | out | 128 | Words 4*k* .. 4*k*+3 in beat *k* |
 | `mwd_last` | out | 1 | Beat 7 |
 
-**Response channel** (READ: 8 beats of data; WRITE: one beat, the acknowledgement)
+**Read-data channel**: the 8 beats of a READ, in cycles `a + T_mem + 1` … `a + T_mem + 8`.
 
 | Signal | Dir | Width | Meaning |
 |---|---|---|---|
-| `mrsp_valid` / `mrsp_ready` | in / out | 1 / 1 | Handshake |
-| `mrsp_tag` | in | 8 | The request's tag |
-| `mrsp_data` | in | 128 | READ data beat |
-| `mrsp_last` | in | 1 | Last beat of this response |
+| `mrd_valid` | in | 1 | Beat valid |
+| `mrd_tag` | in | 16 | The request's tag |
+| `mrd_data` | in | 128 | Words 4*k* .. 4*k*+3 in beat *k* |
+| `mrd_last` | in | 1 | Beat 7 |
+
+**Write-acknowledgement channel**: in cycle `a + T_mem`, once the WRITE is applied.
+
+| Signal | Dir | Width | Meaning |
+|---|---|---|---|
+| `mack_valid` | in | 1 | Acknowledgement |
+| `mack_tag` | in | 16 | The request's tag |
 
 Atomics never appear on this port: the atomic unit turns each one into a READ followed by a WRITE
 (top.md §5).
