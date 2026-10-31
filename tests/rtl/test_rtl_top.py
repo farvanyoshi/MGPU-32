@@ -18,7 +18,7 @@ def top_sources():
     return sources(*files)
 
 
-@pytest.mark.parametrize("cores", [1])
+@pytest.mark.parametrize("cores", [1, 2, 4])
 def test_top_lockstep(cores):
     env = {"C": str(cores), "MEM_SIZE": str(MEM),
            "MGPU_RTL_FUZZ_SEEDS": os.environ.get("MGPU_RTL_FUZZ_SEEDS", "8" if cores == 1 else "4"),
