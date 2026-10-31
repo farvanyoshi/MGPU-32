@@ -116,11 +116,20 @@ An illegal instruction is carried as a fault marker and faults when issued (code
   block RAM (96 KiB in total).
 - v0 reads as 0 and writes to it are dropped.
 
-**Pass `p`** of a vector instruction:
-- reads lane slice [`pL`, `pL + L`) of each source in one cycle;
-- applies the sb broadcast in R;
-- carries the EXEC bits of that slice as a lane-write mask down the pipe. Inactive lanes are never
-  written ([EX-3]).
+**Operand read in the reference RTL.** An issued instruction reads its *whole* 32-lane
+source registers in the operand-read stage. The execution unit is then fed one `L`-lane slice per
+pass from that latched copy, and the merged 32-lane result is written once, at completion.
+- **EXEC.** Inactive lanes keep the old value, which is read with the operands ([EX-3]).
+- **Why this is identical.** A warp never has two instructions in flight, so this is
+  indistinguishable from reading and writing slice by slice, and the timing of §11 is unchanged.
+- **Ports.** Units complete independently, so the register files have one write port per writing
+  unit. A warp still has at most one instruction in flight, so two ports never write the same warp.
+  - Scalar register file: the SALU, VALU (V_CMP, V_READLANE) and LSU (S_LW).
+  - Vector register file: the VALU, FPU, SFU and two LSU paths.
+- **FPGA mapping.** In `rtl/core/mgpu_srf.sv` and `mgpu_vrf.sv` these are behavioural multi-port
+  arrays. Mapping them onto block RAM (the three operand copies described above, banked by pass, plus
+  a live-value table for the multiple writers) is a synthesis-time refinement, evaluated with Yosys in
+  Phase 5c.
 
 ## 7. Execution units
 

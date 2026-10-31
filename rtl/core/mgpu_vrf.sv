@@ -1,33 +1,37 @@
-// mgpu_vrf: vector register file. Three identical copies (one per source operand),
-// each W x 32 registers x P passes entries of L x 32 bits; one write port with a lane
-// mask written to all copies. v0 reads as zero (docs/uarch/core.md section 6).
-// Reads are synchronous (block-RAM style): data appears the cycle after the address.
+// mgpu_vrf: vector register file, W warps x 32 registers x 32 lanes x 32 bits.
+// Full-register (32-lane) combinational reads on NR ports and full-register writes on NW
+// ports (one per writing unit; the executors merge inactive lanes before writing). v0
+// reads as zero. `init` clears every register (ISA 13.3).
+//
+// This is the behavioural form used for simulation. The FPGA mapping (block-RAM banks per
+// pass and operand, a live-value table for the multiple writers) is a synthesis-time
+// refinement; see docs/uarch/core.md section 6.
 module mgpu_vrf #(
-    parameter int W = 8,
-    parameter int L = 8,
-    localparam int P = 32 / L,
-    localparam int WID = $clog2(W),
-    localparam int PB = (P > 1) ? $clog2(P) : 1,
-    localparam int AW = WID + 5 + PB
+    parameter int W  = 8,
+    parameter int NR = 4,
+    parameter int NW = 5,
+    localparam int WID = $clog2(W)
 ) (
-    input  logic                    clk,
-    input  logic [2:0][AW-1:0]      raddr,   // {warp, reg, pass}
-    output logic [2:0][L-1:0][31:0] rdata,
-    input  logic                    we,
-    input  logic [AW-1:0]           waddr,
-    input  logic [L-1:0]            wmask,
-    input  logic [L-1:0][31:0]      wdata
+    input  logic                       clk,
+    input  logic [NR-1:0][WID-1:0]     rwarp,
+    input  logic [NR-1:0][4:0]         raddr,
+    output logic [NR-1:0][31:0][31:0]  rdata,
+    input  logic [NW-1:0]              we,
+    input  logic [NW-1:0][WID-1:0]     wwarp,
+    input  logic [NW-1:0][4:0]         waddr,
+    input  logic [NW-1:0][31:0][31:0]  wdata,
+    input  logic                       init
 );
-  for (genvar c = 0; c < 3; c++) begin : g_copy
-    logic [L-1:0][31:0] mem [2**AW];
-    logic zero_q;
-    logic [L-1:0][31:0] q;
-    always_ff @(posedge clk) begin
-      if (we && waddr[PB +: 5] != 0)
-        for (int i = 0; i < L; i++) if (wmask[i]) mem[waddr][i] <= wdata[i];
-      q <= mem[raddr[c]];
-      zero_q <= raddr[c][PB +: 5] == 0;
+  logic [31:0][31:0] regs [W][32];
+  always_ff @(posedge clk) begin
+    if (init) begin
+      for (int w = 0; w < W; w++) for (int r = 0; r < 32; r++) regs[w][r] <= '0;
+    end else begin
+      for (int p = 0; p < NW; p++)
+        if (we[p] && waddr[p] != 0) regs[wwarp[p]][waddr[p]] <= wdata[p];
     end
-    assign rdata[c] = zero_q ? '0 : q;
+  end
+  for (genvar p = 0; p < NR; p++) begin : g_rd
+    assign rdata[p] = (raddr[p] == 0) ? '0 : regs[rwarp[p]][raddr[p]];
   end
 endmodule

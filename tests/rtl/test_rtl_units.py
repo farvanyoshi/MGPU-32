@@ -53,10 +53,10 @@ def test_core_decode():
 
 
 def test_srf():
-    run_cocotb("mgpu_srf", sources("core/mgpu_srf.sv"), "test_regfiles", extra_env={"RF": "srf"})
+    run_cocotb("mgpu_srf", sources("core/mgpu_srf.sv"), "test_regfiles", parameters={"NR": 5, "NW": 3},
+               extra_env={"RF": "srf", "NR": "5", "NW": "3"})
 
 
-@pytest.mark.parametrize("lanes", [8, 32])
-def test_vrf(lanes):
-    run_cocotb("mgpu_vrf", sources("core/mgpu_vrf.sv"), "test_regfiles", parameters={"L": lanes},
-               extra_env={"RF": "vrf", "L": str(lanes)})
+def test_vrf():
+    run_cocotb("mgpu_vrf", sources("core/mgpu_vrf.sv"), "test_regfiles", parameters={"NR": 4, "NW": 5},
+               extra_env={"RF": "vrf", "NR": "4", "NW": "5"})

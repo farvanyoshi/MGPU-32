@@ -1,5 +1,4 @@
-"""mgpu_srf / mgpu_vrf against a Python model: random writes and reads, zero registers,
-lane masks, synchronous VRF reads."""
+"""mgpu_srf / mgpu_vrf against a Python model: multi-port writes, zero registers, init."""
 
 import os
 import random
@@ -11,73 +10,51 @@ from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge
 from tbutil import pack, unpack
 
 W = 8
-L = int(os.environ.get("L", "8"))
-P = 32 // L
-PB = max(1, (P - 1).bit_length())
+NR = int(os.environ.get("NR", "4"))
+NW = int(os.environ.get("NW", "3"))
+
+
+async def setup(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    dut.we.value = 0
+    dut.init.value = 0
+    await FallingEdge(dut.clk)
 
 
 @cocotb.test()
-async def srf_random(dut):
-    if os.environ.get("RF") != "srf":
-        return
-    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+async def random_ports(dut):
+    vector = os.environ["RF"] == "vrf"
+    width = 1024 if vector else 32
+    await setup(dut)
     rng = random.Random(1)
-    model = {}
-    dut.we.value = 0
+    args = [rng.getrandbits(32) for _ in range(8)]
+    exe = [rng.getrandbits(32) for _ in range(W)]
+    if not vector:
+        dut.init_args.value = pack(args)
+        dut.init_exec.value = pack(exe)
+    dut.init.value = 1
     await FallingEdge(dut.clk)
-    for _ in range(4000):
-        w, r, v = rng.randrange(W), rng.randrange(32), rng.getrandbits(32)
-        dut.we.value = 1
-        dut.wwarp.value, dut.waddr.value, dut.wdata.value = w, r, v
-        if r:
-            model[(w, r)] = v
-        reads = [(rng.randrange(W), rng.randrange(32)) for _ in range(3)]
+    dut.init.value = 0
+    model = {}
+    for w in range(W):
+        for r in range(32):
+            model[(w, r)] = 0 if vector else (args[r - 1] if 1 <= r <= 8 else exe[w] if r == 31 else 0)
+    for _ in range(1500):
+        warps = rng.sample(range(W), NW)               # distinct warps per cycle
+        writes = [(rng.random() < 0.8, w, rng.randrange(32), rng.getrandbits(width)) for w in warps]
+        dut.we.value = pack([int(x[0]) for x in writes], 1)
+        dut.wwarp.value = pack([x[1] for x in writes], 3)
+        dut.waddr.value = pack([x[2] for x in writes], 5)
+        dut.wdata.value = pack([x[3] for x in writes], width)
+        reads = [(rng.randrange(W), rng.randrange(32)) for _ in range(NR)]
         dut.rwarp.value = pack([x[0] for x in reads], 3)
         dut.raddr.value = pack([x[1] for x in reads], 5)
-        await RisingEdge(dut.clk)
         await ReadOnly()
-        got = unpack(dut.rdata.value, 3)
-        for (ww, rr), g in zip(reads, got):
-            assert g == (model.get((ww, rr), g) if rr else 0), (ww, rr, hex(g))
-        await FallingEdge(dut.clk)
-
-
-@cocotb.test()
-async def vrf_random(dut):
-    if os.environ.get("RF") != "vrf":
-        return
-    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
-    rng = random.Random(2)
-    model = {}
-    dut.we.value = 0
-    addr = lambda w, r, p: (w << (5 + PB)) | (r << PB) | p  # noqa: E731
-    await FallingEdge(dut.clk)
-    prev = None
-    for _ in range(3000):
-        w, r, p = rng.randrange(W), rng.randrange(32), rng.randrange(P)
-        mask = rng.getrandbits(L)
-        data = [rng.getrandbits(32) for _ in range(L)]
-        dut.we.value = 1
-        dut.waddr.value, dut.wmask.value, dut.wdata.value = addr(w, r, p), mask, pack(data)
-        reads = [(rng.randrange(W), rng.randrange(32), rng.randrange(P)) for _ in range(3)]
-        dut.raddr.value = pack([addr(*x) for x in reads], 5 + PB + 3)
-        # expected read data: state before this cycle's write (read and write same edge)
-        snap = {k: list(v) for k, v in model.items()}
-        exp = [[0] * L if x[1] == 0 else snap.get(x, None) for x in reads]
-        if r:
-            cur = model.setdefault((w, r, p), [None] * L)
-            for i in range(L):
-                if mask >> i & 1:
-                    cur[i] = data[i]
+        got = unpack(dut.rdata.value, NR, width)
+        for (w, r), g in zip(reads, got):
+            assert g == (0 if r == 0 else model[(w, r)]), (w, r)
         await RisingEdge(dut.clk)
-        await ReadOnly()
-        got = [unpack(int(dut.rdata.value) >> (k * L * 32), L) for k in range(3)]
-        for k in range(3):
-            if exp[k] is None:
-                continue
-            for i in range(L):
-                if exp[k][i] is not None:
-                    assert got[k][i] == exp[k][i], (reads[k], i, hex(got[k][i]), hex(exp[k][i]))
-        prev = got
+        for en, w, r, v in writes:
+            if en and r:
+                model[(w, r)] = v
         await FallingEdge(dut.clk)
-    assert prev is not None
