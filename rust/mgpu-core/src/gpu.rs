@@ -675,6 +675,8 @@ pub struct Gpu {
     pub last_access: Access,
     /// When set, CLOCK reads this value instead of the step number (timing mode).
     pub clock_override: Option<u64>,
+    /// When set, the CYCLES register reports this instead of the step count (timing mode).
+    pub reported_cycles: Option<u64>,
 }
 
 impl Gpu {
@@ -717,6 +719,7 @@ impl Gpu {
             eligible: Vec::new(),
             last_access: Access::default(),
             clock_override: None,
+            reported_cycles: None,
         })
     }
 
@@ -757,7 +760,7 @@ impl Gpu {
             REG_STATUS..=REG_ERR_INFO if off.is_multiple_of(4) => {
                 self.status[((off - REG_STATUS) / 4) as usize]
             }
-            REG_CYCLES => self.steps as u32,
+            REG_CYCLES => self.reported_cycles.unwrap_or(self.steps) as u32,
             0x40..=0x5C if off.is_multiple_of(4) => self.args[((off - REG_ARG0) / 4) as usize],
             _ => 0,
         }
@@ -798,6 +801,7 @@ impl Gpu {
     pub fn begin(&mut self) -> bool {
         self.status = [0; 6];
         self.steps = 0;
+        self.reported_cycles = None;
         self.trace.clear();
         let (entry, grid, bdim) = (self.entry, self.grid_dim, self.block_dim);
         if bdim == 0 || bdim > self.cfg.max_block_dim {
