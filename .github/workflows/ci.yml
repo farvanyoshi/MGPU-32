@@ -1,6 +1,6 @@
-# Runs on every push to main/dev and on pull requests: lints and tests the Rust engine,
-# builds the Python package, checks that generated files are current, and runs the full
-# test suite plus a fuzzing batch (model vs Rust, schedule independence).
+# Runs on every push to main/dev and on pull requests. The `test` job lints and tests the
+# Rust engine, builds the Python package, checks generated files, and runs the test suite
+# plus a fuzzing batch. The `rtl` job lints the SystemVerilog and runs the RTL testbenches.
 name: CI
 
 on:
@@ -50,3 +50,33 @@ jobs:
 
       - name: Fuzzing batch
         run: python -m mgpu.fuzz --seeds 500 --start 1000000
+
+  rtl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Install the package with RTL tools (cocotb, verilator)
+        run: pip install -e ".[test,rtl]"
+
+      - name: Generated RTL files are up to date
+        run: |
+          python tools/gen_isa.py --check
+          python tools/gen_sfu_tables.py --check
+
+      - name: Lint
+        run: make -C rtl lint
+
+      - name: RTL tests (cocotb units, bulk vectors vs the Rust engine)
+        run: python -m pytest -m rtl -q

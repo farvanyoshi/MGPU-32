@@ -102,6 +102,15 @@ uint64_t  mgpu_steps(const mgpu_gpu *gpu);
 int32_t   mgpu_step(mgpu_gpu *gpu, uint32_t block, uint32_t warp, mgpu_record *out);
 uint32_t  mgpu_runnable(const mgpu_gpu *gpu, uint32_t *pairs, uint32_t max_pairs);
 
+/* Bit-exact float operations of the reference engine (for RTL unit testbenches). */
+enum {
+    MGPU_FP_FADD, MGPU_FP_FSUB, MGPU_FP_FMUL, MGPU_FP_FMIN, MGPU_FP_FMAX, MGPU_FP_FFMA,
+    MGPU_FP_I2F, MGPU_FP_F2I, MGPU_FP_FRCP, MGPU_FP_FRSQ, MGPU_FP_FEX2, MGPU_FP_FLG2,
+    MGPU_FP_FEQ, MGPU_FP_FNE, MGPU_FP_FLT, MGPU_FP_FLE, MGPU_FP_FGT, MGPU_FP_FGE
+};
+/* Unused operands are ignored; compares return 0/1; an unknown op returns 0xFFFFFFFF. */
+uint32_t  mgpu_fp_op(uint32_t op, uint32_t a, uint32_t b, uint32_t c);
+
 /* Cycle-level timing model (docs/uarch/core.md section 11). */
 typedef struct {
     uint32_t cores, warps, lanes, sfu_lanes;   /* defaults: 1, 8, 8, 2 */

@@ -398,3 +398,38 @@ pub unsafe extern "C" fn mgpu_launch_timed(
         Err(e) => err_code(&e),
     }
 }
+
+/// Float operation codes for `mgpu_fp_op` (see include/mgpu_core.h).
+pub const MGPU_FP_OPS: [&str; 18] = [
+    "fadd", "fsub", "fmul", "fmin", "fmax", "ffma", "i2f", "f2i", "frcp", "frsq", "fex2", "flg2",
+    "feq", "fne", "flt", "fle", "fgt", "fge",
+];
+
+/// One bit-exact float operation of the reference engine (unused operands are ignored).
+/// Compares return 0 or 1. An unknown `op` returns 0xFFFFFFFF.
+#[no_mangle]
+pub extern "C" fn mgpu_fp_op(op: u32, a: u32, b: u32, c: u32) -> u32 {
+    use crate::fp::{self, FCond};
+    use crate::sfu;
+    match op {
+        0 => fp::fadd(a, b),
+        1 => fp::fsub(a, b),
+        2 => fp::fmul(a, b),
+        3 => fp::fmin(a, b),
+        4 => fp::fmax(a, b),
+        5 => fp::ffma(a, b, c),
+        6 => fp::i2f(a),
+        7 => fp::f2i(a),
+        8 => sfu::frcp(a),
+        9 => sfu::frsq(a),
+        10 => sfu::fex2(a),
+        11 => sfu::flg2(a),
+        12 => fp::fcmp(FCond::Eq, a, b) as u32,
+        13 => fp::fcmp(FCond::Ne, a, b) as u32,
+        14 => fp::fcmp(FCond::Lt, a, b) as u32,
+        15 => fp::fcmp(FCond::Le, a, b) as u32,
+        16 => fp::fcmp(FCond::Gt, a, b) as u32,
+        17 => fp::fcmp(FCond::Ge, a, b) as u32,
+        _ => u32::MAX,
+    }
+}

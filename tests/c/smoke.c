@@ -81,6 +81,13 @@ int main(void) {
     if (trep.issued != 30 || trep.cycles < 100 || mgpu_reg_read(g, MGPU_REG_CYCLES) != trep.cycles)
         { printf("timing report %llu %llu\n", (unsigned long long)trep.issued, (unsigned long long)trep.cycles); return 1; }
 
+    /* 5. bit-exact float operations */
+    if (mgpu_fp_op(MGPU_FP_FADD, 0x3F800000u, 0x3F800000u, 0) != 0x40000000u ||
+        mgpu_fp_op(MGPU_FP_FFMA, 0x3F800001u, 0x3FC00000u, 0x8D800000u) != 0x3FC00001u ||
+        mgpu_fp_op(MGPU_FP_FRCP, 0x40800000u, 0, 0) != 0x3E800000u ||
+        mgpu_fp_op(MGPU_FP_FLT, 0x80000000u, 0, 0) != 0 || mgpu_fp_op(99, 0, 0, 0) != 0xFFFFFFFFu)
+        { puts("fp_op mismatch"); return 1; }
+
     mgpu_destroy(g);
     puts("OK");
     return 0;
