@@ -13,6 +13,7 @@ dependencies = ["numpy"]
 
 [project.scripts]
 mgpu-as = "mgpu.asm.cli:main"
+mgpu-dis = "mgpu.asm.dis_cli:main"
 
 [project.optional-dependencies]
 test = ["pytest"]
