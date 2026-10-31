@@ -84,6 +84,23 @@ port** uses the full request, write-data and response channels of §2, plus atom
 
 The arbiter adds the `{core, port}` bits to the tag on the way out and strips them on the way back.
 
+### 4.1 As built in Phase 5b (`mgpu_core`)
+
+The core's ports are the segment-wide form of §3 and §4. The Phase 5c top adds the beat conversion,
+tags and arbitration:
+
+| Port | Signals | Meaning |
+|---|---|---|
+| Dispatch | `start`, `new_launch`, `entry`, `block_id`, `block_dim`, `grid_dim`, `num_warps`, `args`, `mem_last` | `start` is taken when the core is idle or in its `block_done` cycle; `new_launch` invalidates the I-cache |
+| Status | `idle`, `block_done`, `kill` | `block_done` is high in the first cycle after the block completes (all warps exited, stores acknowledged); `kill` aborts the block at once |
+| I-fetch | `if_req_{valid,addr,id}`, `if_resp_{valid,id,data}` | READ of one segment; `id` = the slot of the warp that missed; data is the whole segment (32 words) in the response cycle |
+| LSU request | `lsu_req` (`mreq_t`) | One segment per cycle: kind, `{warp, segment index}` tag, address, WRITE mask and data, ATOMIC lanes, offsets, operands and operation |
+| LSU responses | `rd_*`, `at_*`, `ack_*` | READ segment data, ATOMIC old values per lane, WRITE acknowledgements; each at most one per cycle |
+| Retire | `ret_valid`, `ret` (`retire_t` × NRET) | One record per completed instruction (`mgpu_record` fields plus the issue clock); a fault is a record with event 3 |
+
+A response is delivered in its completion cycle as defined in core.md §11.4 (a READ at
+`a + T_mem + 8`).
+
 ## 5. Core-internal pipeline interfaces
 
 Every stage register carries:

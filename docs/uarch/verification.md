@@ -34,6 +34,8 @@ simulators (`tools/gen_isa.py`, `tools/gen_sfu_tables.py`). Their freshness is c
 
 ## 3. Core level: lockstep co-simulation (breakpoint 6)
 
+*Status: done. See [`docs/rtl/README.md`](../rtl/README.md) §5–6 for what runs and the volumes.*
+
 The core runs a real program while the reference engine runs in **driven mode**:
 
 1. The testbench loads the same memory image into the RTL's memory model and into `mgpu._core.Gpu`,
@@ -45,6 +47,14 @@ The core runs a real program while the reference engine runs in **driven mode**:
    - The RTL exposes a *retire port*: one record per retired instruction, carrying exactly the
      `mgpu_record` fields.
 3. At the end, it compares STATUS and the ERR_* registers (E2/E3) and all of global memory (E1).
+4. It also compares the launch's cycle count with `launch_timed` under the same parameters. On a
+   single core the RTL matches the timing model exactly on every program run so far, so the cycle
+   comparison of §4 is already exact at core level.
+
+With one warp per block nothing can depend on the schedule, and the testbench compares atomic
+values as well. Multi-warp programs from the fuzzer are restricted to eq mode (well-defined
+programs), because for a racy program the engine executes each instruction at its retire cycle
+while the RTL's memory sees it at request time.
 
 Because the engine follows whatever warp order the RTL chooses, the comparison is exact even for
 programs whose results depend on the schedule.

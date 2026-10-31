@@ -17,7 +17,7 @@ reviewed before continuing.
 | 3 | `bp3-toolchain` | Assembler, disassembler, runner, host API, kernel suite | **done** |
 | 4 | `bp4-uarch` | Microarchitecture specification + cycle-level timing model | **done** |
 | 5 | `bp5-rtl-units` | RTL execution units (ALU, FPU, SFU) verified with cocotb/Verilator | **done** |
-| 6 | `bp6-rtl-core` | Full RTL core, lockstep trace co-simulation | planned |
+| 6 | `bp6-rtl-core` | Full RTL core, lockstep trace co-simulation, cycle-exact vs the timing model | **done** |
 | 7 | `bp7-rtl-top` / `v1.0` | Multi-core top level, host interface, synthesis report | planned |
 
 ## The architecture in one paragraph
@@ -45,7 +45,7 @@ with a barrier, and a weak memory model.
 | [`kernels/README.md`](kernels/README.md) | Example kernels and what their statistics show |
 | [`docs/uarch/README.md`](docs/uarch/README.md) | Reference microarchitecture: parameters, top level, core, interfaces, timing contract |
 | [`docs/uarch/performance.md`](docs/uarch/performance.md) | Timing model and the design-space measurements behind the parameters |
-| [`docs/uarch/verification.md`](docs/uarch/verification.md) | How the RTL will be verified against the simulators |
+| [`docs/uarch/verification.md`](docs/uarch/verification.md) | How the RTL is verified against the simulators |
 | [`docs/rtl/README.md`](docs/rtl/README.md) | The SystemVerilog: layout, conventions, how to lint and test, what is verified |
 
 ## Repository layout
@@ -63,7 +63,7 @@ python/mgpu/               Python package: ISA tables, bit-exact float32, refere
 rust/mgpu-core/            fast simulator engine and cycle-level timing model
                            (also a C library: include/mgpu_core.h)
 rust/mgpu-py/              Python bindings (mgpu._core)
-rtl/                       SystemVerilog (packages generated from spec/; units: VALU, FPU, SFU)
+rtl/                       SystemVerilog (packages generated from spec/; units: VALU, FPU, SFU; the core)
 tb/                        RTL testbenches: cocotb (Python) and a Verilator C++ bulk harness
 tools/                     generators (gen_isa.py, gen_sfu_tables.py), sfu_accuracy.py, bench.py,
                            sweep.py (design-space sweep with the timing model)
@@ -110,7 +110,7 @@ python tools/bench.py                            # simulator throughput
 mgpu-run kernels/saxpy.s ... --timing --warps 8  # cycle-level timing of the reference design
 python tools/sweep.py                            # design-space sweep (warps, lanes, memory latency)
 pip install -e ".[rtl]" && make -C rtl lint      # RTL: Verilator + cocotb, lint
-python -m pytest -m rtl                          # RTL unit testbenches (bit-exact vs the engine)
+python -m pytest -m rtl                          # RTL units (bit-exact) and the core in lockstep with the engine
 ```
 
 Generated files must stay in sync with their sources:

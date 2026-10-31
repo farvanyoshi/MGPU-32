@@ -78,5 +78,5 @@ jobs:
       - name: Lint
         run: make -C rtl lint
 
-      - name: RTL tests (cocotb units, bulk vectors vs the Rust engine)
+      - name: RTL tests (units, bulk vectors, core lockstep and fuzz vs the Rust engine)
         run: python -m pytest -m rtl -q
