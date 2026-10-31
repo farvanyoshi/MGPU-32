@@ -11,6 +11,7 @@ module mgpu_core_decode_probe
     output logic        vec_dst,
     output logic        scl_dst,
     output logic        branch,
+    output logic        b_imm,
     output logic        mem_shared
 );
   ctrl_t c;
@@ -23,5 +24,6 @@ module mgpu_core_decode_probe
   assign vec_dst = c.vec_dst;
   assign scl_dst = c.scl_dst;
   assign branch = c.branch;
+  assign b_imm = c.b_imm;
   assign mem_shared = c.mem_shared;
 endmodule

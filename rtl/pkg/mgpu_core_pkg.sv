@@ -10,6 +10,7 @@ package mgpu_core_pkg;
     unit_e       unit;
     logic [4:0]  rd, ra, rb, rc;
     logic        sb;          // rb is a broadcast scalar ([ENC-1]); 0 when rb is not vb|sb
+    logic        b_imm;       // operand B is `imm` (immediate or shift-amount forms)
     logic [31:0] imm;         // extended immediate, shift amount, or byte branch offset
     logic        vec_dst;     // writes a vector register
     logic        scl_dst;     // writes a scalar register
@@ -53,6 +54,11 @@ package mgpu_core_pkg;
     logic [31:0][31:0] mw_addr;
     logic [31:0][31:0] mw_val;
   } retire_t;
+
+  // Fault codes (ISA 12, STATUS / ERR_CODE).
+  localparam logic [7:0] E_ILLEGAL = 8'd1, E_MISALIGNED = 8'd2, E_RANGE = 8'd3, E_BARRIER = 8'd4;
+  // Record events.
+  localparam logic [1:0] EV_NONE = 2'd0, EV_EXIT = 2'd1, EV_BAR = 2'd2, EV_FAULT = 2'd3;
 
   // Retire channels, in the order the testbench consumes a cycle's records.
   localparam int NRET = 7;

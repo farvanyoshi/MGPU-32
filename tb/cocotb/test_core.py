@@ -1,0 +1,210 @@
+"""mgpu_core in lockstep with the Rust engine (lockstep.py): directed programs and random
+ALU-only programs. Every retired instruction is compared under rule E4; selected
+programs also check the launch's cycle count against the timing model (core.md 11)."""
+
+import os
+import random
+
+import cocotb
+
+from mgpu import _core
+from mgpu.asm import assemble
+from mgpu.fuzz import gen as fuzz_gen
+
+from lockstep import Launch, Lockstep
+
+W = int(os.environ.get("W", "8"))
+L = int(os.environ.get("L", "8"))
+S = int(os.environ.get("S", "2"))
+CODE = 0x1000
+T_MEM, T_SEG = 100, 8
+
+
+def timed_cycles(ln: Launch) -> int:
+    g = _core.Gpu(mem_size=ln.mem_size, max_block_dim=32 * W)
+    g.mem_write(ln.entry, b"".join(w.to_bytes(4, "little") for w in ln.words))
+    for addr, words in ln.memory.items():
+        g.mem_write(addr, b"".join(w.to_bytes(4, "little") for w in words))
+    from mgpu import hostregs as hr
+    for off, v in {hr.ENTRY: ln.entry, hr.GRID_DIM: ln.grid, hr.BLOCK_DIM: ln.block,
+                   **{hr.ARG(i): a for i, a in enumerate(ln.args)}}.items():
+        g.reg_write(off, v)
+    rep = g.launch_timed(cores=1, warps=W, lanes=L, sfu_lanes=S, mem_latency=T_MEM, seg_cycles=T_SEG)
+    return rep["cycles"]
+
+
+async def lockstep(dut, src_or_words, check_cycles=False, **kw):
+    words = src_or_words if isinstance(src_or_words, list) else assemble(src_or_words, CODE).words
+    ln = Launch(words, entry=CODE, **kw)
+    res = await Lockstep(dut, ln, W, T_MEM, T_SEG).run()
+    want = timed_cycles(ln)
+    msg = f"{res.retired} instructions retired in lockstep, {res.cycles} cycles (timing model {want})"
+    dut._log.info(msg)
+    if check_cycles:
+        assert res.cycles == want, msg
+    return res
+
+
+@cocotb.test()
+async def scalar_chain(dut):
+    for n in (0, 1, 5):
+        res = await lockstep(dut, "S_ADDI s1, s1, 1\n" * n + "EXIT", check_cycles=True)
+        assert res.cycles == 116 + 4 * n
+
+
+@cocotb.test()
+async def vector_chain(dut):
+    await lockstep(dut, "V_ADDI v1, v1, 1\n" * 6 + "EXIT", check_cycles=True)
+    await lockstep(dut, "V_FADD v1, v1, v1\n" * 4 + "V_FRCP v2, v1\nEXIT", check_cycles=True)
+
+
+@cocotb.test()
+async def scalar_ops(dut):
+    await lockstep(dut, """
+        S_LUI  s9, 0x8000
+        S_ORI  s9, s9, 0x1234
+        S_ADDI s10, s0, -7
+        S_ADD  s11, s9, s10
+        S_SUB  s12, s10, s9
+        S_MUL  s13, s9, s10
+        S_AND  s14, s9, s10
+        S_OR   s15, s9, s10
+        S_XOR  s16, s9, s10
+        S_ANDN s17, s9, s10
+        S_SHL  s18, s9, s10
+        S_SHR  s19, s9, s10
+        S_SRA  s20, s9, s10
+        S_SLT  s21, s10, s9
+        S_SLTU s22, s10, s9
+        S_MIN  s23, s9, s10
+        S_MAX  s24, s9, s10
+        S_SHLI s25, s9, 3
+        S_SRAI s26, s9, 31
+        S_POPC s27, s9
+        S_FF1  s28, s9
+        S_ANDI s29, s10, 0xF0F0
+        S_GETSR s1, BLOCK_ID
+        S_GETSR s2, BLOCK_DIM
+        S_GETSR s3, GRID_DIM
+        S_GETSR s4, WARP_ID
+        S_GETSR s5, NUM_WARPS
+        S_GETSR s6, CLOCK
+        S_GETSR s7, CLOCK
+        NOP
+        FENCE
+        EXIT""", block=96, grid=2, check_cycles=True)
+
+
+@cocotb.test()
+async def vector_ops(dut):
+    await lockstep(dut, """
+        V_GETSR v1, LANE_ID
+        V_GETSR v2, TID
+        V_GETSR v3, GTID
+        V_GETSR v4, CLOCK
+        S_LI   s9, 0x3FC00000          ; 1.5
+        V_ADD  v5, v1, v2
+        V_SUB  v6, v1, s9
+        V_MUL  v7, v2, v3
+        V_SHLI v8, v1, 27
+        V_SRA  v9, v8, v1
+        V_MIN  v10, v8, v9
+        V_ADDI v11, v1, -16
+        V_ANDI v12, v3, 0x55
+        V_IMAD v13, v1, v2, v3
+        V_CMP.LT s10, v1, v11
+        V_CMP.GEU s11, v11, s9
+        V_SEL  v14, v1, v2, s10
+        V_SHFL v15, v3, v12
+        V_SHFL v16, v3, s11
+        V_READLANE s12, v3, s10
+        V_I2F  v17, v11
+        V_FMUL v18, v17, s9
+        V_FADD v19, v18, v17
+        V_FFMA v20, v18, v19, v17
+        V_FMIN v21, v19, v20
+        V_CMP.FLT s13, v18, v17
+        V_F2I  v22, v20
+        V_FRCP v23, v18
+        V_FRSQ v24, v19
+        V_FEX2 v25, v17
+        V_FLG2 v26, v19
+        EXIT""", block=64, check_cycles=True)
+
+
+@cocotb.test()
+async def divergence_and_loops(dut):
+    await lockstep(dut, """
+               V_GETSR v1, LANE_ID
+               S_ADDI s1, s0, 10
+               S_ADDI s2, s0, 0
+       loop:   S_ADD  s2, s2, s1
+               V_ADD  v2, v2, v1
+               S_ADDI s1, s1, -1
+               S_BNZ  s1, loop
+               S_BZ   s1, skip
+               S_ADDI s2, s2, 1000
+       skip:   S_J    end
+               S_ADDI s2, s2, 2000
+       end:    V_ADDI v3, v0, 16
+               V_CMP.LT  s10, v1, v3
+               S_MOV     s11, s31
+               S_MOV     s31, s10
+               S_BZ      s31, else
+               V_ADDI    v4, v1, 1000
+       else:   S_ANDN    s31, s11, s10
+               S_BZ      s31, endif
+               V_ADDI    v4, v1, 2000
+       endif:  S_MOV     s31, s11
+               S_GETSR   s3, WARP_ID
+               S_BNZ     s3, out
+               EXIT
+       out:    V_FADD    v5, v4, v4
+               EXIT""", block=200, grid=3, check_cycles=True)
+
+
+@cocotb.test()
+async def illegal_instruction(dut):
+    words = assemble("V_GETSR v1, TID\nV_FRCP v2, v1\nS_ADDI s1, s1, 1\nS_GETSR s2, WARP_ID\n"
+                     "S_BNZ s2, bad\nEXIT\nbad: EXIT", CODE).words
+    words[-1] = 0xFC00_0000            # warp 1+ reach an illegal word
+    res = await lockstep(dut, words, block=128, check_cycles=True)
+    assert res.fault and res.fault[0] == 1
+
+
+@cocotb.test()
+async def fetch_fault(dut):
+    res = await lockstep(dut, "V_ADDI v1, v1, 3\nS_J far\nEXIT\nfar:", block=64, mem_size=0x1010,
+                         check_cycles=True)
+    assert res.fault and res.fault[0] == 3
+
+
+class AluGen(fuzz_gen.Gen):
+    """The fuzzer's structured generator without memory instructions or barriers."""
+
+    def mem_diff(self):
+        self.alu()
+
+    def prologue(self, block_dim):
+        b = self.b
+        b.emit("V_GETSR", rd=1, ra=17)
+        b.emit("V_GETSR", rd=2, ra=18)
+        for vr in (3, 4, 5, 6):
+            b.emit("V_I2F", rd=vr, ra=self.rng.choice([1, 2]))
+        for sr in self.rng.sample(fuzz_gen.S_DST, 4):
+            b.li(sr, fuzz_gen.random_f32(self.rng) if self.rng.random() < 0.5 else self.rng.getrandbits(32))
+
+
+@cocotb.test()
+async def random_alu_programs(dut):
+    n = int(os.environ.get("SEEDS", "12"))
+    for seed in range(n):
+        g = AluGen(seed, "diff")
+        block = g.rng.choice([1, 17, 32, 33, 64, 96, 32 * W])
+        grid = g.rng.randint(1, 2)
+        g.prologue(block)
+        g.block_of(g.rng.randint(20, 80), 0, False)
+        g.b.emit("EXIT")
+        words = g.b.finish()
+        dut._log.info(f"seed {seed}: {len(words)} words, grid {grid} x {block}")
+        await lockstep(dut, words, grid=grid, block=block)

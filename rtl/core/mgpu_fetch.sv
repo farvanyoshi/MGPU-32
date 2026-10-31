@@ -25,6 +25,7 @@ module mgpu_fetch
     input  logic                clk,
     input  logic                rst_n,
     input  logic                inv,          // launch: invalidate the cache, clear all state
+    input  logic                clr,          // block start: clear the per-warp state only
     input  logic [31:0]         mem_last,     // MEM_SIZE - 4
     // requests from the warp table
     input  logic [W-1:0]        req,
@@ -120,6 +121,10 @@ module mgpu_fetch
       ibuf_valid <= '0;
       mreq_valid <= 1'b0;
       rr <= '0;
+    end else if (clr) begin
+      wait_v <= '0;
+      d_valid <= '0;
+      ibuf_valid <= '0;
     end else begin
       // install a returning line (a miss in this cycle to the same entry overrides it)
       if (r_install) begin

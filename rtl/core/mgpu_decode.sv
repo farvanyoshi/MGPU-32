@@ -40,6 +40,8 @@ module mgpu_decode
       OP_V_LW, OP_V_SW, OP_V_LDS, OP_V_STS: ctrl.sb = 1'b0;
       default: ctrl.sb = (word[31:26] inside {6'h02, 6'h03, 6'h04, 6'h06, 6'h16}) && word[10];
     endcase
+    ctrl.b_imm = d.op inside {OP_S_ADDI, OP_S_ANDI, OP_S_ORI, OP_S_LUI, OP_V_ADDI, OP_V_ANDI,
+                              OP_S_SHLI, OP_S_SHRI, OP_S_SRAI, OP_V_SHLI, OP_V_SHRI, OP_V_SRAI};
     ctrl.branch = d.op inside {OP_S_BZ, OP_S_BNZ, OP_S_J};
     ctrl.mem_shared = d.op inside {OP_V_LDS, OP_V_STS, OP_V_ATOM_ADD_S, OP_V_ATOM_MIN_S,
                                    OP_V_ATOM_MAX_S, OP_V_ATOM_XCHG_S, OP_V_ATOM_AND_S,

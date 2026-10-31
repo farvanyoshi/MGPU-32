@@ -40,6 +40,7 @@ def expected(word):
                 vec_dst=int(bool(syn) and syn[0] == "vd"),
                 scl_dst=int(bool(syn) and syn[0] == "sd" and ins.group not in ("S_BZ", "S_BNZ")),
                 branch=int(ins.group in ("S_BZ", "S_BNZ", "S_J")),
+                b_imm=int(any(t in ("simm16", "uimm16", "shamt") for t in syn)),
                 mem_shared=int(ins.space == "shared"))
 
 

@@ -74,6 +74,7 @@ async def lockstep(dut):
     rng = random.Random(77 + W)
     dut.rst_n.value = 0
     dut.inv.value = 0
+    dut.clr.value = 0
     dut.mem_last.value = MEM_LAST
     dut.req.value = 0
     dut.consume.value = 0

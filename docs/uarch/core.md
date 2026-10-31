@@ -106,6 +106,12 @@ fetch-fault marker, which faults when the warp is next scheduled ([MEM-7]).
 
 An illegal instruction is carried as a fault marker and faults when issued (code 1, info = word).
 
+Every fault is detected at issue (illegal words, fetch-fault markers, LSU address checks, barrier
+mismatches). The core then stops issuing, lets every instruction already in flight complete, and
+reports the fault record no earlier than *t* + 3. Instructions issued before the fault therefore
+take full effect, which is the order in which the reference engine executes them. `CYCLES` still
+follows §11.6 (issue cycle + 1).
+
 ## 6. Register files (`mgpu_srf`, `mgpu_vrf`)
 
 **Scalar register file:** W × 32 × 32 bits (1 KiB at W = 8).
