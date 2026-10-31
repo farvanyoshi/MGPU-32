@@ -93,6 +93,37 @@ impl std::fmt::Display for SimError {
 
 impl std::error::Error for SimError {}
 
+/// What memory an instruction touched, for the timing model: the address of every
+/// active lane (or the single scalar address in lane 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AccessKind {
+    #[default]
+    None,
+    Load,
+    Store,
+    Atomic,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Access {
+    pub kind: AccessKind,
+    pub shared: bool,
+    /// Lanes that accessed memory (bit i = lane i).
+    pub lanes: u32,
+    pub addrs: [u32; WARP],
+}
+
+impl Access {
+    fn vector(kind: AccessKind, shared: bool, lanes: u32, addrs: [u32; WARP]) -> Self {
+        Access {
+            kind,
+            shared,
+            lanes,
+            addrs,
+        }
+    }
+}
+
 /// An architectural fault (ISA section 11), raised before any state is modified.
 #[derive(Clone, Copy, Debug)]
 struct Fault {
@@ -292,7 +323,7 @@ fn lane_addresses(
     Ok(a)
 }
 
-fn sr_value(id: u32, ctx: &Ctx, bid: u32, wid: u32, lane: u32, step: u64) -> u32 {
+fn sr_value(id: u32, ctx: &Ctx, bid: u32, wid: u32, lane: u32, clock: u64) -> u32 {
     use crate::isa_gen::*;
     let tid = WARP as u32 * wid + lane;
     match id {
@@ -301,7 +332,7 @@ fn sr_value(id: u32, ctx: &Ctx, bid: u32, wid: u32, lane: u32, step: u64) -> u32
         SR_GRID_DIM => ctx.grid,
         SR_WARP_ID => wid,
         SR_NUM_WARPS => ctx.num_warps,
-        SR_CLOCK => step as u32,
+        SR_CLOCK => clock as u32,
         SR_TID => tid,
         SR_LANE_ID => lane,
         SR_GTID => bid.wrapping_mul(ctx.block_dim).wrapping_add(tid),
@@ -324,6 +355,8 @@ fn execute(
     mem: &mut [u8],
     ctx: &Ctx,
     step: u64,
+    clock: u64,
+    acc: &mut Access,
 ) -> Result<Record, Fault> {
     use Op::*;
     let Block {
@@ -483,11 +516,11 @@ fn execute(
                     w,
                     &mut rec,
                     d.rd,
-                    sr_value(id, ctx, bid, wid as u32, 0, step),
+                    sr_value(id, ctx, bid, wid as u32, 0, clock),
                 );
             } else {
                 vec_op(w, &mut rec, d.rd, exec, |_, i| {
-                    sr_value(id, ctx, bid, wid as u32, i as u32, step)
+                    sr_value(id, ctx, bid, wid as u32, i as u32, clock)
                 });
             }
         }
@@ -511,6 +544,14 @@ fn execute(
             if code != 0 {
                 return Err(fault(code, 0, addr));
             }
+            let mut addrs = [0u32; WARP];
+            addrs[0] = addr;
+            let kind = if d.op == SLw {
+                AccessKind::Load
+            } else {
+                AccessKind::Store
+            };
+            *acc = Access::vector(kind, false, 1, addrs);
             if d.op == SLw {
                 write_s(w, &mut rec, d.rd, load(mem, addr));
             } else {
@@ -527,6 +568,7 @@ fn execute(
                 d.simm16,
                 if sh { SHARED_SIZE } else { ctx.mem_size },
             )?;
+            *acc = Access::vector(AccessKind::Load, sh, exec, a);
             let m: &[u8] = mem;
             vec_op(w, &mut rec, d.rd, exec, |_, i| {
                 if sh {
@@ -545,6 +587,7 @@ fn execute(
                 d.simm16,
                 if sh { SHARED_SIZE } else { ctx.mem_size },
             )?;
+            *acc = Access::vector(AccessKind::Store, sh, exec, a);
             let data = w.v[d.rd];
             for i in 0..WARP {
                 if active(exec, i) {
@@ -571,6 +614,7 @@ fn execute(
                 0,
                 if sh { SHARED_SIZE } else { ctx.mem_size },
             )?;
+            *acc = Access::vector(AccessKind::Atomic, sh, exec, a);
             let mut old = [0u32; WARP];
             for i in 0..WARP {
                 if active(exec, i) {
@@ -627,6 +671,10 @@ pub struct Gpu {
     last: Option<(u32, u32)>,
     prng: Option<Xorshift64Star>,
     eligible: Vec<(u32, u32)>,
+    /// Memory touched by the most recent step (for the timing model).
+    pub last_access: Access,
+    /// When set, CLOCK reads this value instead of the step number (timing mode).
+    pub clock_override: Option<u64>,
 }
 
 impl Gpu {
@@ -667,6 +715,8 @@ impl Gpu {
             last: None,
             prng: None,
             eligible: Vec::new(),
+            last_access: Access::default(),
+            clock_override: None,
         })
     }
 
@@ -826,8 +876,18 @@ impl Gpu {
     fn retire(&mut self, bid: u32, wid: usize) -> Record {
         let step = self.steps;
         let ctx = self.ctx;
+        let clock = self.clock_override.unwrap_or(step);
         let blk = self.blocks.get_mut(&bid).expect("block is resident");
-        let rec = match execute(blk, wid, &mut self.mem, &ctx, step) {
+        self.last_access = Access::default();
+        let rec = match execute(
+            blk,
+            wid,
+            &mut self.mem,
+            &ctx,
+            step,
+            clock,
+            &mut self.last_access,
+        ) {
             Ok(r) => r,
             Err(f) => {
                 let w = &blk.warps[wid];
@@ -943,6 +1003,11 @@ impl Gpu {
             self.trace.push(rec.clone());
         }
         Ok(rec)
+    }
+
+    /// (GRID_DIM, BLOCK_DIM, NUM_WARPS) of the current or last launch.
+    pub fn launch_shape(&self) -> (u32, u32, u32) {
+        (self.ctx.grid, self.ctx.block_dim, self.ctx.num_warps)
     }
 
     /// Architectural state of a warp (needs keep_state once its block has finished).

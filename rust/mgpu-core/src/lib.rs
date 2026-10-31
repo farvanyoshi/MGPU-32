@@ -16,5 +16,5 @@ pub mod sfu;
 pub mod sfu_tables;
 pub mod trace;
 
-pub use gpu::{Config, Gpu, SimError, Warp, WarpState};
+pub use gpu::{Access, AccessKind, Config, Gpu, SimError, Warp, WarpState};
 pub use trace::Record;
