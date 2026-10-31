@@ -77,3 +77,8 @@ def test_vexec(kind, lanes, lat):
 def test_fetch(warps):
     run_cocotb("mgpu_fetch", sources("core/mgpu_decode.sv", "core/mgpu_fetch.sv"), "test_fetch",
                parameters={"W": warps}, extra_env={"W": str(warps)})
+
+
+def test_host_regs():
+    run_cocotb("mgpu_host_regs", sources("top/mgpu_host_regs.sv"), "test_host_regs",
+               parameters={"W": 8, "MEM_SIZE": 1 << 20}, extra_env={"W": "8", "MEM_SIZE": str(1 << 20)})
