@@ -18,6 +18,7 @@ mgpu-run = "mgpu.runner:main"
 
 [project.optional-dependencies]
 test = ["pytest"]
+rtl = ["cocotb>=2.0", "verilator"]
 
 [tool.maturin]
 python-source = "python"
@@ -26,3 +27,4 @@ manifest-path = "rust/mgpu-py/Cargo.toml"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["rtl: RTL simulation tests (need verilator and cocotb; pip install -e '.[rtl]')"]
