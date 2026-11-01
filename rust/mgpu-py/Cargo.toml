@@ -1,0 +1,14 @@
+[package]
+name = "mgpu-py"
+description = "Python bindings (mgpu._core) for the MGPU-32 simulator engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+mgpu-core = { path = "../mgpu-core" }
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py311"] }

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "mgpu"
+version = "0.2.0"
+description = "MGPU-32: a minimal RISC GPU - reference model, fast simulator and toolchain"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = ["numpy"]
+
+[project.scripts]
+mgpu-as = "mgpu.asm.cli:main"
+mgpu-dis = "mgpu.asm.dis_cli:main"
+mgpu-run = "mgpu.runner:main"
+
+[project.optional-dependencies]
+test = ["pytest"]
+rtl = ["cocotb>=2.0", "verilator"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "mgpu._core"
+manifest-path = "rust/mgpu-py/Cargo.toml"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["rtl: RTL simulation tests (need verilator and cocotb; pip install -e '.[rtl]')"]
