@@ -76,7 +76,7 @@ def run(top: str, cores: int, target: str, sv2v: str, yosys: str) -> dict:
     subprocess.run([sv2v, "-w", str(verilog)] + [str(s) for s in sources()], check=True)
     params = f"-chparam C {cores}" if top == "mgpu_gpu" else ""
     synth = {"ecp5": f"synth_ecp5 -top {top}", "xc7": f"synth_xilinx -family xc7 -top {top}"}[target]
-    script = f"read_verilog {verilog}; hierarchy -top {top} {params}; {synth}; tee -o {OUT}/stat_{top}_{target}.txt stat"
+    script = f"read_verilog -sv {verilog}; hierarchy -top {top} {params}; {synth}; tee -o {OUT}/stat_{top}_{target}.txt stat"
     log = OUT / f"yosys_{top}_{cores}_{target}.log"
     with open(log, "w") as f:
         subprocess.run([yosys, "-q", "-p", script], check=True, stdout=f, stderr=subprocess.STDOUT)

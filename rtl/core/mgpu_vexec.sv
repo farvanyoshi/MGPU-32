@@ -219,10 +219,10 @@ module mgpu_vexec
     x_res = '0;
     x_res.r = ret_from(x);
     merged = vd;
+    for (int i = 0; i < 32; i++) if (x.exec[i]) merged[i] = va[vb[i][4:0]];   // V_SHFL
     if (x.ctrl.op == OP_V_READLANE) begin
       x_res.r = ret_scalar(x_res.r, x.ctrl.rd, va[x.sb[4:0]]);   // ignores EXEC
     end else begin
-      for (int i = 0; i < 32; i++) if (x.exec[i]) merged[i] = va[vb[i][4:0]];
       x_res.r = ret_vector(x_res.r, x.ctrl.rd, merged);
       x_res.w.valid = x.ctrl.rd != 5'd0;
       x_res.w.warp = x.warp;
